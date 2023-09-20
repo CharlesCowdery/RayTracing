@@ -1,0 +1,1755 @@
+// spatialPartitioning.cpp : This file contains the 'main' function. Program execution begins and ends there.
+//
+
+#include <iostream>
+#include <vector>
+#include <tuple>
+#include <math.h>
+#include <format>
+#include <string>
+#include <ctime>
+#include <chrono>
+#include <SFML/Graphics.hpp>
+#include <functional>
+#include <fstream>
+
+#include <cassert>
+#include <intrin.h>
+
+#define PIXEL_SCALAR 1
+#define assertm(exp, msg) assert(((void)msg, exp))
+#define SMALL 0.001
+#define NEAR_THRESHOLD 0.001
+#define SCENE_BOUNDS 1000
+#define RED_MASK 255<<16
+#define GREEN_MASK 255<<8
+#define BLUE_MASK 255
+
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#define MAX(a,b) ((a)>(b)?(a):(b))
+
+#define PI 3.1415
+
+#define OBJECT_CULLING true
+#define CULL_RECEDING_OBJECTS true
+#define LAZY_OBJECT_CHECKING true
+//defines program precision
+#define decimal float
+
+using namespace std;
+
+decimal fRand(decimal fMin, decimal fMax) //https://stackoverflow.com/a/2704552
+{
+    decimal f = (decimal)rand() / RAND_MAX;
+    return fMin + f * (fMax - fMin);
+}
+
+std::vector<std::string> readLinesFromFile(const std::string& fileName) { //chatgpt lol
+    std::vector<std::string> lines;
+    std::ifstream file(fileName);
+
+    if (!file.is_open()) {
+        std::cerr << "Error opening file: " << fileName << std::endl;
+        return lines;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        lines.push_back(line);
+    }
+
+    file.close();
+    return lines;
+}
+
+struct XYZ {
+public:
+    decimal X;
+    decimal Y;
+    decimal Z;
+    XYZ() : X(0), Y(0), Z(0) {}
+    XYZ(decimal _X, decimal _Y, decimal _Z) : X(_X), Y(_Y), Z(_Z) {}
+    XYZ clone() {
+        return XYZ(X, Y, Z);
+    }
+    void add(decimal addend) {
+        X += addend;
+        Y += addend;
+        Z += addend;
+    }
+    void add(const XYZ& other) {
+        X += other.X;
+        Y += other.Y;
+        Z += other.Z;
+    }
+    void divide(decimal divisor) {
+        X /= divisor;
+        Y /= divisor;
+        Z /= divisor;
+    }
+    void clip_negative(decimal clip_to = 0) {
+        X = (X < 0) ? clip_to : X;
+        Y = (Y < 0) ? clip_to : Y;
+        Z = (Z < 0) ? clip_to : Z;
+    }
+    decimal smallest() {
+        if (X < Y) {
+            if (X < Z) {
+                return X;
+            }
+            else {
+                return Z;
+            }
+        }
+        else {
+            if (Y < Z) {
+                return Y;
+            }
+            else {
+                return Z;
+            }
+        }
+    }
+    void make_safe() { //ensures point can always be used for division
+        X = (X == 0) ? 0.000001 : X;
+        Y = (Y == 0) ? 0.000001 : Y;
+        Z = (Z == 0) ? 0.000001 : Z;
+    }
+    decimal magnitude() {
+        return sqrt(X * X + Y * Y + Z * Z); // 
+    }
+    decimal magnitude_noRT() {
+        return X * X + Y * Y + Z * Z; // 
+    }
+    void normalize() {
+        decimal len = magnitude();
+        divide(len);
+    }
+    static XYZ reflect(XYZ vector, XYZ pole) {
+        decimal vector_magnitude = vector.magnitude();
+        decimal pole_magnitude = pole.magnitude();
+        decimal mag_ratio = vector_magnitude / pole_magnitude;
+        XYZ reflection_point = pole * (XYZ::cosine(vector, pole) * mag_ratio);
+        XYZ pointing = reflection_point - vector;
+        //decimal component = 2*XYZ::cosine(vector, pole)-1; //Weird math shit.
+        return vector + (pointing * 2);
+    }
+    static XYZ floor(XYZ point) {
+        return XYZ(
+            std::floor(point.X),
+            std::floor(point.Y),
+            std::floor(point.Z)
+        );
+    }
+    static XYZ min(XYZ point, decimal value) {
+        return XYZ(
+            (point.X < value) ? point.X : value,
+            (point.Y < value) ? point.Y : value,
+            (point.Z < value) ? point.Z : value
+        );
+
+    }
+    static XYZ min(decimal value, XYZ point) {
+        return XYZ::min(point, value);
+    }
+    static XYZ min(XYZ point, XYZ other) {
+        return XYZ(
+            (point.X < other.X) ? point.X : other.X,
+            (point.Y < other.Y) ? point.Y : other.Y,
+            (point.Z < other.Z) ? point.Z : other.Z
+        );
+    }
+    static XYZ max(XYZ point, XYZ other) {
+        return XYZ(
+            (point.X > other.X) ? point.X : other.X,
+            (point.Y > other.Y) ? point.Y : other.Y,
+            (point.Z > other.Z) ? point.Z : other.Z
+        );
+    }
+    static XYZ max(XYZ point, decimal value) {
+        return XYZ(
+            (point.X > value) ? point.X : value,
+            (point.Y > value) ? point.Y : value,
+            (point.Z > value) ? point.Z : value
+        );
+
+    }
+    static decimal length(const XYZ& vector) {
+        return sqrt(vector.X * vector.X + vector.Y * vector.Y + vector.Z * vector.Z);
+    }
+
+    static XYZ normalize(const XYZ& vector) {
+        decimal len = XYZ::length(vector);
+        return XYZ(vector.X / len, vector.Y / len, vector.Z / len);
+    }
+    static XYZ divide(const XYZ& point, const XYZ& other) {
+        return XYZ(point.X / other.X, point.Y / other.Y, point.Z / other.Z);
+    }
+    static XYZ divide(const XYZ& point, decimal divisor) {
+        return XYZ(point.X / divisor, point.Y / divisor, point.Z / divisor);
+    }
+    static XYZ add(const XYZ& point, decimal addend) {
+        return XYZ(point.X + addend, point.Y + addend, point.Z + addend);
+    }
+    static XYZ add(const XYZ& point, const XYZ& other) {
+        return XYZ(point.X + other.X, point.Y + other.Y, point.Z + other.Z);
+    }
+    static decimal distance_noRt(XYZ& point, XYZ& other) {
+        decimal f1 = point.X - other.X;
+        decimal f2 = point.Y - other.Y;
+        decimal f3 = point.Z - other.Z;
+        return f1 * f1 + f2 * f2 + f3 * f3;
+    }
+    static decimal distance(const XYZ& point,const XYZ& other){
+        decimal f1 = point.X - other.X;
+        decimal f2 = point.Y - other.Y;
+        decimal f3 = point.Z - other.Z;
+        return sqrt(f1 * f1 + f2 * f2 + f3 * f3);
+    }
+    static XYZ slope(XYZ point, XYZ other) {
+        decimal distance = XYZ::distance(point, other);
+        return (other - point) / distance;
+    }
+    static XYZ flip(XYZ point) {
+        return XYZ(-point.X, -point.Y, -point.Z);
+    }
+    static decimal dot(XYZ point, XYZ other) {
+        return point.X * other.X + point.Y * other.Y + point.Z * other.Z;
+    }
+    static decimal cosine(XYZ point, XYZ other) {
+        decimal result = XYZ::dot(point, other) / (point.magnitude() * other.magnitude());
+        return result;
+    }
+    static XYZ pow(XYZ point, decimal power) {
+        return XYZ(std::pow(point.X, power), std::pow(point.Y, power), std::pow(point.Z, power));
+    }
+    static XYZ cross(XYZ point, XYZ other) {
+        return XYZ(
+            point.Y * other.Z - point.Z * other.Y,
+            point.Z * other.X - point.X * other.Z,
+            point.X * other.Y - point.Y * other.X
+        );
+    }
+    static XYZ log(XYZ point) {
+        return XYZ(
+            log10(point.X),
+            log10(point.Y),
+            log10(point.Z)
+        );
+    }
+    string to_string() {
+        return std::to_string(X) + ", " + std::to_string(Y) + ", " + std::to_string(Z);
+    }
+    XYZ operator/(const XYZ& other) const {
+        return XYZ(X / other.X, Y / other.Y, Z / other.Z);
+    }
+    XYZ operator/(decimal divisor) const {
+        return XYZ(X / divisor, Y / divisor, Z / divisor);
+    }
+    XYZ operator+(const XYZ& other) const {
+        return XYZ(X + other.X, Y + other.Y, Z + other.Z);
+    }
+    XYZ operator+(decimal addend) const {
+        return XYZ(X + addend, Y + addend, Z + addend);
+    }
+    XYZ operator-(const XYZ& other) const {
+        return XYZ(X - other.X, Y - other.Y, Z - other.Z);
+    }
+    XYZ operator-(const decimal addend) const {
+        return XYZ(X - addend, Y - addend, Z - addend);
+    }
+    XYZ operator*(const decimal multiplier) const {
+        return XYZ(X * multiplier, Y * multiplier, Z * multiplier);
+    }
+    XYZ operator*(const XYZ& other) const {
+        return XYZ(X * other.X, Y * other.Y, Z * other.Z);
+    }
+    XYZ operator+=(XYZ other) {
+        X += other.X;
+        Y += other.Y;
+        Z += other.Z;
+        return *this;
+    }
+    XYZ operator-() {
+        return XYZ(-X, -Y, -Z);
+    }
+    bool operator !=(const XYZ& other) {
+        return !((X == other.X) && (Y == other.Y) && (Z == other.Z));
+    }
+    static XYZ linear_mix(decimal c, XYZ first, XYZ second) {
+        decimal i = 1 - c;
+        return XYZ(first.X * i + second.X * c, first.Y * i + second.Y * c, first.Z * i + second.Z * c);
+    }
+
+
+};
+XYZ operator*(decimal self, XYZ point) {
+    return point * self;
+}
+XYZ operator-(decimal self, XYZ point) {
+    return point + self;
+}
+std::ostream& operator<<(std::ostream& os, XYZ& m) {
+    return os << m.to_string();
+}
+
+typedef tuple<XYZ, XYZ, XYZ> Face;
+typedef tuple<bool, bool, bool> tri_bool;
+
+class Material {
+public:
+    int material_type = 0;
+    XYZ color = XYZ(0,0,0);
+    decimal roughness = 0.1;
+    decimal metallic  = 0;
+    decimal specular  = 0;
+    decimal emission  = 0;
+    XYZ emissive_color = XYZ(0, 0, 0);
+    Material() {}
+    Material(XYZ _color) : color(_color) {}
+    Material* clone() {
+        Material* new_self = new Material(color);
+        new_self->material_type = 0;
+        new_self->roughness = roughness;
+        new_self->metallic = metallic;
+        new_self->specular = specular;
+        new_self->emission = emission;
+        new_self->emissive_color = emissive_color.clone();
+        return new_self;
+    }
+    decimal get_diffuse_factor() {
+        return 1-min(max(metallic, specular), (decimal)1.0);
+    }
+    decimal get_specular_factor() {
+        return min(max(metallic,specular),(decimal)1.0);
+    }
+    XYZ get_specular_color() {
+        return XYZ::linear_mix(metallic, specular * XYZ(1, 1, 1), color);
+    }
+    XYZ get_diffuse_color() {
+        return color / PI;
+    }
+    XYZ get_fresnel(XYZ light_slope,XYZ normal) {
+        XYZ specular_color = get_specular_color();
+        auto second_term = (1 - specular_color)*pow(1 - XYZ::dot(light_slope, normal), 5);
+        return specular_color + second_term;
+    }
+    decimal get_normal_distribution_beta(XYZ normal, XYZ half_vector){
+        decimal a = roughness;
+        decimal dot = XYZ::dot(normal, half_vector);
+        decimal exponent = -(1 - pow(dot, 2)) / (pow(a*dot,2));
+        decimal base = 1 / (PI * pow(a,2) * pow(dot, 4));
+        decimal final = base * exp(exponent);
+
+        return final;
+    }
+    decimal get_normal_distribution_GGXTR(XYZ normal, XYZ half_vector) {
+        decimal a = roughness;
+        decimal dot = XYZ::dot(normal, half_vector);
+        decimal final = (a * a)
+                          /
+            (PI * pow((dot*dot)*(a*a-1)+1,2));
+
+        return final;
+    }
+    decimal geoSchlickGGX(XYZ normal, XYZ vector,  decimal k) {
+
+        decimal dot = XYZ::dot(normal,vector);
+
+        return dot / (dot * (1 - k) + k);
+        //return 1;
+
+    }
+    XYZ calculate_BRDF_coefficient(XYZ normal, XYZ input_slope, XYZ output_slope) {
+        
+        if (XYZ::dot(normal, input_slope) <= 0 || XYZ::dot(normal, output_slope) <= 0) {
+            return XYZ(0,0,0);
+        }
+
+        decimal k = pow(roughness + 1, 2) / 8;
+
+        XYZ half_vector = XYZ::add(input_slope, output_slope);
+        half_vector.normalize();
+        XYZ fresnel = get_fresnel(output_slope, half_vector);
+        auto geo = geoSchlickGGX(normal, output_slope, k) * geoSchlickGGX(normal, input_slope, k);//Smiths method
+        auto normal_dist = get_normal_distribution_GGXTR(normal, half_vector);
+        decimal divisor = (4 * XYZ::dot(normal, input_slope) * XYZ::dot(normal, output_slope));
+        //fresnel = XYZ(1,1,1);
+        //geo = 1;
+        //normal_dist = 1;
+        //divisor = 4;
+        XYZ specular_output = get_specular_factor()*(geo * normal_dist * fresnel) / divisor; //* ;
+        XYZ diffuse_output = get_diffuse_factor() * get_diffuse_color();
+        XYZ BRDF_color = specular_output + diffuse_output;
+        //return fresnel;//specular_output;
+        return BRDF_color* XYZ::dot(normal, input_slope);//
+    }
+    XYZ calculate_BRDF(XYZ normal, XYZ input_light, XYZ input_slope, XYZ output_slope) {
+        return calculate_BRDF_coefficient(normal, input_slope, output_slope);
+    }
+    Material atUV(decimal x, decimal y) {
+
+    }
+    XYZ calculate_emissions() {
+        return emission * emissive_color;
+    }
+};
+
+class Primitive {
+public:
+    Material material;
+    //pair<XYZ, XYZ> bounds;
+    XYZ origin;
+    int obj_type = 0;
+    Primitive(Material _material) {
+        material = _material;
+    }
+    virtual pair<XYZ, XYZ> get_bounds() { return pair<XYZ, XYZ>(); }
+
+    virtual bool check_backface(XYZ& position) { return false; }
+
+    virtual decimal distance(XYZ& position) { 
+        cout << "[ERROR] Default distance function called! Something is misconfigured!" << endl;
+        return 0;
+    } //how to fix if this gets called: alcohol and crying
+    virtual Material material_properties_at(XYZ) {
+        return material;
+    }
+};
+
+class PointLikeLight {
+public:
+    XYZ origin;
+    Primitive* host;
+    PointLikeLight(XYZ _origin, Primitive* _host) : origin(_origin), host(_host) {}
+};
+
+class Sphere : public Primitive {
+public:
+    decimal radius = 0;
+    Sphere(decimal _radius, XYZ _origin, Material _material): Primitive(_material){
+        radius = _radius;
+        origin = _origin;
+        //bounds = get_bounds();
+        obj_type = 1;
+    }
+    pair<XYZ, XYZ> get_bounds() {
+        XYZ pos = origin + radius;
+        XYZ neg = origin - radius;
+        return pair<XYZ, XYZ>(pos, neg);
+    }
+    
+    bool check_backface(XYZ &position) {
+        return true;
+    }
+
+    decimal distance(XYZ& position) {
+        return XYZ::distance(origin,position) - radius;
+    }
+
+    static decimal distance(const XYZ& origin, const decimal radius, const XYZ& position) {
+        return XYZ::distance(origin, position) - radius;
+    }
+
+    static XYZ normal(const XYZ& origin, XYZ point) {
+        return XYZ::slope(origin, point);
+    }  
+
+    XYZ normal(XYZ point) {
+        return XYZ::normalize(XYZ::slope(origin, point));
+    }
+};
+
+struct PackagedSphere { //reduced memory footprint to improve cache perf
+    decimal radius;
+    XYZ origin;
+    Material* material;
+    bool culled;
+    decimal prev_distance;
+    PackagedSphere(Sphere& sphere) {
+        radius = sphere.radius;
+        origin = sphere.origin;
+        material = &sphere.material;
+    }
+};
+
+/*
+class Tri : public Primitive {
+public:
+    XYZ p1, p2, p3;
+    XYZ midpoint;
+    XYZ normal;
+    decimal radius; //this is used for acceleration.
+    decimal complex_check_radius;
+    const decimal ratio = 1.2;
+    Tri(XYZ point1, XYZ point2, XYZ point3, Material _material) : Primitive(_material, LightFactoryFunction) {
+        XYZ midpoint = (point1 + point2 + point3) / 3; //Holy fuck being able to just add objects is sooooo convenient my GOD
+        Tri(point1, point2, point3, midpoint, _material);
+
+    }
+    Tri(XYZ point1, XYZ point2, XYZ point3, XYZ _origin, Material _material) : Primitive(_material, LightFactoryFunction) {
+        obj_type = 3;
+        emissive_type = 2;
+        light_type = 2;
+        outFunc = outFunction;
+
+        p1 = point1;
+        p2 = point2;
+        p3 = point3;
+        midpoint = (point1 + point2 + point3) / 3;
+        origin = _origin;
+        bounds = get_bounds();
+        normal = get_normal();
+
+        radius = get_circumscribed_radius();
+        complex_check_radius = radius * ratio;
+    }
+    decimal get_circumscribed_radius() {
+        decimal p1_d = XYZ::distance(p1, midpoint);
+        decimal p2_d = XYZ::distance(p2, midpoint);
+        decimal p3_d = XYZ::distance(p3, midpoint);
+        return max(p1_d, max(p2_d,p3_d));
+    }
+    pair<XYZ, XYZ> get_bounds() {
+        XYZ pos = XYZ::max(p1, XYZ::max(p2, p3));
+        XYZ neg = XYZ::min(p1,XYZ::min(p2,p3));
+        return pair<XYZ, XYZ>(pos, neg);
+    }
+    XYZ get_normal() {
+        return XYZ::cross(p2-p1,p3-p1);
+    }
+    bool check_backface(XYZ& position) {
+        return true;
+    }
+
+    decimal distance(XYZ& position) {
+        return XYZ::distance(origin, position) - radius;
+    }
+
+    decimal complex_distance(XYZ& position) {
+        XYZ projected_position = (position - XYZ::dot(position-midpoint, normal) * normal)+midpoint;
+    }
+
+    static XYZ normal(const XYZ& origin, XYZ point) {
+        return XYZ::slope(origin, point);
+    }
+};
+*/
+class Plane : public Primitive {
+public:
+    XYZ normal;
+    XYZ origin_offset;
+    Plane( XYZ _normal, XYZ _origin, Material _material) : Primitive(_material) {
+        origin = _origin;
+        normal = XYZ::normalize(_normal);
+        origin_offset = XYZ::dot(origin, normal) * normal;
+        obj_type = 2;
+    }
+
+    bool check_backface(XYZ& position) {
+        return true;
+    }
+    static decimal distance(const XYZ& normal, const XYZ& origin_offset, const XYZ& position) {
+        return XYZ::dot(position - origin_offset, normal);
+    }
+    decimal distance(XYZ& position) {
+        //XYZ projected_point = (position - XYZ::dot(position, normal) * normal)+origin_offset;
+        //return XYZ::distance(position, projected_point);
+        return XYZ::dot(position-origin_offset, normal);//this is like wildly simplified from position-(position after projection onto plane)
+        //just ends in a dot product. Aint that weird
+    }
+};
+
+struct PackagedPlane {
+    XYZ normal;
+    XYZ origin_offset;
+    Material* material;
+    bool culled;
+    decimal prev_distance;
+    PackagedPlane(Plane& plane) {
+        normal = plane.normal;
+        origin_offset = plane.origin_offset;
+        material = &plane.material;
+    }
+};
+
+class Mesh{
+    vector<Face> faces;
+    vector<XYZ> planes;
+    Mesh() {}
+    int import_file(string file_name) {
+        return 0;
+    }
+    vector<Primitive> get_primitives() {
+
+    }
+};
+
+
+class Lens {
+public:
+    vector<vector<XYZ>> output_grid;
+    vector<vector<XYZ>> slope_grid;
+    void (*_calculate_grid)(Lens* self, int resolution_x, int resolution_y);
+    void calculate_vectors(int resolution_x, int resolution_y, XYZ focal_position) {
+        for (vector<XYZ>& row : output_grid) {
+            vector<XYZ> output_row;
+            for (XYZ& lens_pos : row) {
+                XYZ slope = lens_pos - focal_position;
+                output_row.push_back(XYZ::normalize(slope));
+            }
+            slope_grid.push_back(output_row);
+        }
+    }
+    void calculate_grid(int resolution_x, int resolution_y) {
+        _calculate_grid(this, resolution_x, resolution_y);
+    }
+
+};
+
+class RectLens : public Lens {
+public:
+    decimal width;
+    decimal vertical_ratio;
+    RectLens(decimal _width, decimal _vertical_ratio) : width(_width), vertical_ratio(_vertical_ratio) {
+        _calculate_grid = _calculate_grid_function;
+    }
+    static void _calculate_grid_function(Lens* self, int resolution_x, int resolution_y) {
+        RectLens* self_rect = (RectLens*)self;
+        self_rect->output_grid.clear();
+        decimal height = self_rect->width * self_rect->vertical_ratio;
+        decimal partial_width = self_rect->width / resolution_x;
+        decimal partial_height = height / resolution_y;
+        for (int y = 0; y < resolution_y; y++) {
+            vector<XYZ> output_row;
+            for (int x = 0; x < resolution_x; x++) {
+                output_row.push_back(XYZ(x * partial_width - self_rect->width / 2 + partial_width / 2, -y * partial_height + height / 2 - partial_height / 2, 0));
+            }
+            self->output_grid.push_back(output_row);
+        }
+    }
+};
+
+class Scene ;
+class Ray ;
+
+class Accelerator {
+public:
+    Scene* scene;
+
+    vector<XYZ>sphere_origins;
+    vector<decimal>sphere_radius;
+    vector<Sphere*>sphere_ptrs;
+
+    vector<XYZ>plane_normals;
+    vector<XYZ>plane_offsets;
+    vector<Plane*>plane_ptrs;
+
+    vector<XYZ>point_light_origins;
+    vector<PointLikeLight*>point_light_ptrs;
+    Accelerator(Scene* _scene) : scene(_scene) {};
+
+    void prep(vector<Sphere*> spheres, vector<Plane*> planes, vector<PointLikeLight*> pointlike_lights) {
+        for (Sphere* sphere : spheres) {
+            sphere_origins.push_back(sphere->origin.clone());
+            sphere_radius.push_back(sphere->radius);
+            sphere_ptrs.push_back(sphere);
+        }
+        for (Plane* plane : planes) {
+            plane_normals.push_back(plane->normal.clone());
+            plane_offsets.push_back(plane->origin_offset.clone());
+            plane_ptrs.push_back(plane);
+        }
+        for (PointLikeLight* PLL : pointlike_lights) {
+            point_light_origins.push_back(PLL->host->origin);
+            point_light_ptrs.push_back(PLL);
+        }
+    }
+};
+
+
+class Scene {
+public:
+    
+    //Im trying something here. Im going to organize objects into groups, and then explicitly process each one when casting. Pain the ass for me, but in theory it makes for cleaner execution and code.
+    //my justification here is that polymorphism can make for some really just nasty fucking code. Doing this will force me to make more modular code and more explicit optimizations.
+    //C++ just wasnt made to be flexible :(
+
+    int object_count = 0;
+    vector<Sphere*> spheres;
+    vector<Plane*> planes;
+
+    vector<PointLikeLight*> pointlike_lights;
+
+    int current_resolution_x;
+    int current_resolution_y;
+    Scene() {}
+    
+    void register_sphere(Sphere* sphere) {
+        object_count++;
+        spheres.push_back(sphere);
+        if (sphere->material.emission > 0) {
+            pointlike_lights.push_back(new PointLikeLight(sphere->origin,(Primitive*)sphere));
+        }
+    }
+
+    void register_plane(Plane* plane) {
+        object_count++;
+        planes.push_back(plane);
+    }
+
+    
+private:
+    
+};
+/*
+class Spatial_Cube {
+public:
+    bool subdivided = false;
+    decimal radius = 0;
+    XYZ origin;
+    XYZ max_bound;
+    XYZ min_bound;
+    vector<Spatial_Cube> children;
+    vector<Primitive*> contents;
+    vector<Primitive*> global_contents;
+    vector<Light*> global_lights;
+    vector<Primitive*> aggregate;
+    Spatial_Cube(decimal _radius, XYZ _origin) {
+        radius = _radius;
+        origin = _origin;
+        max_bound = origin + radius;
+        min_bound = origin - radius;
+    }
+    void prep() {
+        aggregate.clear();
+        for (Primitive* local_object : contents) {
+            aggregate.push_back(local_object);
+        }
+        for (Primitive* global_object : global_contents) {
+            aggregate.push_back(global_object);
+        }
+    }
+    void register_object(Primitive* entry, bool is_global = false, bool force_complex_light = false) {
+        if (entry->material.emission > 0) {
+            Light* light = entry->makeLight(force_complex_light);
+            global_lights.push_back(light);
+        }
+        if (is_global) {
+            global_contents.push_back(entry);
+        }
+        else {
+            contents.push_back(entry);
+        }
+    }
+    void register_light(Light* light) {
+        switch (light->light_type) {
+        case 0:
+            global_lights.push_back(light);
+            break;
+        case 1:
+            global_lights.push_back(light);
+            break;
+        default:
+            break;
+        }
+    }
+    int subdivide(int threshold = 10) {
+        if (contents.size() < threshold) {
+            return 1;
+        }
+        decimal z_mod = radius / 2;
+        decimal y_mod = radius / 2;
+        decimal x_mod = radius / 2;
+        for (int i = 0; i < 2; i++) { //ugly and terrible, but convenient. creates children cubes.
+            for (int j = 0; j < 2; j++) {
+                for (int k = 0; k < 2; k++) {
+                    children.push_back(Spatial_Cube(radius / 2.0, XYZ::add(origin, XYZ(x_mod, y_mod, z_mod))));
+                    x_mod *= -1;
+                }
+                y_mod *= -1;
+            }
+            z_mod *= -1;
+        }
+        for (int i = 0; i < 8; i++) {
+            Spatial_Cube* child_cube = &children.at(i);
+            for (Primitive* object : global_contents) {
+                child_cube->register_object(object,true);
+            }
+
+            for (Primitive* object : contents) {
+                if (child_cube->check_clip(object->bounds)) { //Im so sorry. This is just frankly painful
+                    child_cube->register_object(object);
+                }
+            }
+        }
+        int internal_counter = 1; //counts number of spatial_cubes it contains, and itself;
+        for (int i = 0; i < 8; i++) {
+            Spatial_Cube* child_cube = &children.at(i);
+            internal_counter += child_cube->subdivide(threshold);
+        }
+        return internal_counter;
+    }
+    bool check_clip(const XYZ &upper, const XYZ &lower) { //mildly cancer. confusing to look at so lemme explain
+        //this is a compressed and efficient version of iterating all possible corners of the tested bounding box to see if any are inside the spaital cube
+        //since all 8 corners are variations of the minimum and maximum coordinate, if between the two there is an x, y, and z that is within bound, that coresponds to a corner that clips the spatial cube.
+        tri_bool upper_clip = make_tuple(
+            upper.X < max_bound.X && upper.X > min_bound.X,
+            upper.Y < max_bound.Y && upper.Y > min_bound.Y,
+            upper.Z < max_bound.Z && upper.Z > min_bound.Z
+        );
+
+        tri_bool lower_clip = make_tuple(
+            lower.X < max_bound.X && lower.X > min_bound.X,
+            lower.Y < max_bound.Y && lower.Y > min_bound.Y,
+            lower.Z < max_bound.Z && lower.Z > min_bound.Z
+        );
+        return  (get<0>(upper_clip) || get<0>(lower_clip)) &&
+            (get<1>(upper_clip) || get<1>(lower_clip)) &&
+            (get<2>(upper_clip) || get<2>(lower_clip));
+    }
+    bool check_clip(const pair<XYZ,XYZ> &bounds) { //wraps for convenience. not sure if const ref is useful here
+        return check_clip(bounds.first, bounds.second);
+    }
+    bool contains(const XYZ& point) {
+        return point.X < max_bound.X && point.X > min_bound.X &&
+            point.Y < max_bound.Y && point.Y > min_bound.Y &&
+            point.Z < max_bound.Z && point.Z > min_bound.Z;
+    }
+    /*string diagnose(bool verbose, int tabs) {
+        string tab_base = "";
+        for (int i = 0; i < tabs; i++) {
+            tab_base += "    ";
+        }
+        string base = format("Cube -> || radius: {} || X: {} Y: {} Z: {} || {} Objects || {} Subdivisions\n", radius, origin.X, origin.Y, origin. Z, contents.size(), children.size());
+        for (int i = 0; i < children.size(); i++) {
+            for (int i = 0; i < tabs; i++) {
+                base += tab_base;
+            }
+            auto child = children.at(i);
+            string treechar = "   ";
+            if (i == children.size() - 1) {
+                treechar = "   ";
+            }
+            base +=treechar + child.diagnose(verbose, tabs + 1);
+        }
+        return base;
+    }
+
+    Spatial_Cube* navigate(XYZ point) {
+        if (children.size() > 0) {
+            for (Spatial_Cube& child : children) {
+                if (child.contains(point)) {
+                    return child.navigate(point);
+                }   
+            }
+            return this;
+        }
+        else {
+            return this;
+        }
+    }
+}; 
+*/
+
+template <typename T> struct Forwarder {
+    T* ptr;
+    Forwarder(T* point_to) :ptr(point_to) {}
+};
+
+struct Luminance_Link {
+    vector<Luminance_Link*>backward_links;
+    Luminance_Link* forward_link;
+    Forwarder<Luminance_Link>* my_link = nullptr;
+    XYZ my_value;
+    XYZ my_coefficient;
+    Luminance_Link() {
+        my_link = new Forwarder<Luminance_Link>(this);
+        my_coefficient = XYZ(1, 1, 1);
+    }
+    Luminance_Link(XYZ value, XYZ coefficient, Luminance_Link* _forward_link, Forwarder<Luminance_Link>* my_l) :
+        my_value(value), my_coefficient(coefficient), forward_link(_forward_link), my_link(my_l) {}
+
+    XYZ calculate_output() {
+        XYZ out = XYZ(0,0,0);
+        for (auto LuLi : backward_links) {
+            out+=LuLi->calculate_output();
+        }
+        return out * my_coefficient+my_value*my_coefficient;
+    }
+    void destroy_forwarder() {
+        if (my_link != nullptr) {
+            delete my_link;
+            my_link = nullptr;
+        }
+    }
+    ~Luminance_Link(){
+        for (auto LuLi : backward_links) {
+            delete LuLi;
+        }
+        destroy_forwarder();
+    }
+};
+
+//This exists to be a fixed size object for use in ray pacakges. when the ray is freed, this creates a luminance link, and relinks the associated links. 
+//uses a pointer pointer so that any other links pointing at it will be able to find it after it is destroyed into a real LL. When it is destroyed it updates the pointer address
+
+//I cannot emphasize this enough, this was BORN to leak memory
+//If I made this wrong, or its not used right, it will leak memory. no question about it
+struct LL_precursor { 
+    Forwarder<Luminance_Link>* forward_link;
+    Forwarder<Luminance_Link>* my_link;
+    XYZ coefficient = XYZ(1,1,1);
+    XYZ value = XYZ(-1,-1,-1);
+
+    LL_precursor(Forwarder<Luminance_Link>* forwarder_LL, XYZ coeff, XYZ _value) {
+        my_link = new Forwarder<Luminance_Link>(nullptr);
+        forward_link = forwarder_LL;
+        coefficient = coeff;
+        value = _value;
+    }
+    LL_precursor(Forwarder<Luminance_Link>* forwarder_LL, XYZ coeff) {
+        my_link = new Forwarder<Luminance_Link>(nullptr);
+        forward_link = forwarder_LL;
+        coefficient = coeff;
+    }
+    LL_precursor(Forwarder<Luminance_Link>* forwarder_LL) {
+        my_link = new Forwarder<Luminance_Link>(nullptr);
+        forward_link = forwarder_LL;
+    }
+    ~LL_precursor() {
+        if (value != XYZ(-1, -1, -1)) {
+            Luminance_Link* new_link = new Luminance_Link(value, coefficient, forward_link->ptr, my_link);
+            forward_link->ptr->backward_links.push_back(new_link);
+            my_link->ptr = new_link;
+        }
+;    }
+};
+
+class Montecarlo_Anchor{
+    vector<XYZ*> returned_luminances;
+};
+/*
+class Ray {
+public:
+    Scene* scene;
+    Accelerator* accelerator;
+
+    XYZ position;
+    XYZ slope;
+    decimal distance_traveled = 0;
+
+    const int default_smallest = 99999999;
+    decimal first_distance;
+    decimal second_distance;
+    Primitive* first_primitive;
+
+    vector<decimal> previous_distances;
+    vector<bool> object_cull_states; // corresponds to the aggregate primitive array. true means the object is checked for distance
+
+    #if LAZY_OBJECT_CHECKING
+        //used for lazy object checking
+        decimal full_check_threshold = 0; 
+        Primitive* focus = nullptr;
+    #endif
+
+    Ray(XYZ _position, XYZ _slope, Scene* _scene, Accelerator* _accelerator):scene(_scene), position(_position), accelerator(_accelerator) {
+        _slope.make_safe();
+        slope = _slope;
+        int object_count = scene->object_count;
+        object_cull_states = vector<bool>(object_count, true);
+        previous_distances = vector<decimal>(object_count, 999999999);
+    }
+    void process_distance_result(decimal distance, int object_index, Primitive* prim) {
+        #if CULL_RECEDING_OBJECTS
+        const decimal previous_distance = previous_distances[object_index];
+        object_cull_states[object_index] = distance < previous_distance; //might be more optimal due to branch prediction than an (if >) cull_state = false assuming the vector is held in cache
+        previous_distances[object_index] = distance;
+        #endif
+
+        if (distance < first_distance) {
+            #if LAZY_OBJECT_CHECKING
+            second_distance = first_distance;
+            #endif
+            first_distance = distance;
+            first_primitive = prim;
+        }
+        #if LAZY_OBJECT_CHECKING
+        else if (distance < second_distance) {
+            second_distance = first_distance;
+        }
+        #endif
+    }
+    void search_lazy() {
+        first_distance = default_smallest;
+        second_distance = default_smallest;
+        int object_index = 0;
+        for (int sphere_index = 0; sphere_index < scene->spheres.size(); sphere_index++) {
+            if (object_cull_states[object_index]){
+                Sphere* sphere = scene->spheres.at(sphere_index);
+                decimal distance = sphere->distance(position);
+                if (distance < first_distance) {
+                    first_distance = distance;
+                    first_primitive = sphere;
+                }
+            }
+            object_index++;
+        }
+        for (int plane_index = 0; plane_index < scene->planes.size(); plane_index++) {
+            if (object_cull_states[object_index]) {
+                decimal distance = scene->planes.at(plane_index)->distance(position);
+                    if (distance < first_distance) {
+                        first_distance = distance;
+                        first_primitive = scene->planes.at(plane_index);
+                    }
+            }
+            object_index++;
+        }
+    }
+    void search() {
+        first_distance = default_smallest;
+        second_distance = default_smallest;
+        int object_index = 0;
+        for (int sphere_index = 0; sphere_index < scene->spheres.size(); sphere_index++) {
+            if (object_cull_states[object_index]) {
+                process_distance_result(
+                    Sphere::distance(
+                        accelerator->sphere_origins[sphere_index],
+                        accelerator->sphere_radius[sphere_index],
+                        position
+                    ),
+                    object_index,
+                    accelerator->sphere_ptrs[sphere_index]
+                );
+            }
+            object_index++;
+        }
+        for (int plane_index = 0; plane_index < scene->planes.size(); plane_index++) {
+            if (object_cull_states[object_index]) {
+                process_distance_result(
+                    Plane::distance(
+                        accelerator->plane_normals[plane_index],
+                        accelerator->plane_offsets[plane_index],
+                        position
+                    ),
+                    object_index,
+                    accelerator->plane_ptrs[plane_index]
+                );
+            }
+            object_index++;
+        }
+#if LAZY_OBJECT_CHECKING
+        if (second_distance == default_smallest) {
+            second_distance = first_distance;
+        }
+        full_check_threshold = second_distance + distance_traveled;
+#endif
+    }
+    bool step() {
+        if (position.magnitude()>10000) {
+            first_primitive = nullptr;
+            return true;
+        }
+        else {
+#if LAZY_OBJECT_CHECKING
+            if (distance_traveled < full_check_threshold) {
+                decimal focus_distance;
+                if (focus->obj_type == 1) {
+                    focus_distance = ((Sphere*)focus)->distance(position);
+                }
+                else {
+                    focus_distance = ((Plane*)focus)->distance(position);
+                }
+                first_distance = min(full_check_threshold - distance_traveled, focus_distance);
+            }
+            else {
+                search();
+            }
+#else
+            search();
+#endif
+            position.add(slope * first_distance);
+            distance_traveled += first_distance;
+            if (first_distance <= NEAR_THRESHOLD) {
+                return  true;
+            }
+            else {
+                return false;
+            }
+        }
+    }
+    XYZ calculate_light_emissions(Primitive* primitive) {
+        Material material_at = primitive->material_properties_at(position);
+        return material_at.emission * material_at.emissive_color;
+    }
+    bool simple_cast() {
+        bool hit_results;
+        do {
+            hit_results = step();
+        }
+        while (!hit_results);
+        return hit_results;
+
+    }
+    XYZ* emit(int max_bounce) {
+        bool hit = simple_cast();
+
+        Primitive* returned_object = first_primitive;
+
+        XYZ final_return = XYZ(0,0,0);
+        if (returned_object != nullptr) {
+            XYZ point_normal;
+            if (returned_object->obj_type == 1) {
+                //point_normal = Sphere::normal(returned_object -> origin, position);
+                point_normal = ((Sphere*)returned_object)->normal(position);
+            }
+            else {
+                point_normal = ((Plane*)returned_object)->normal;
+            }
+            XYZ reflection_return = XYZ(0, 0, 0);
+            XYZ diffuse_return = XYZ(0, 0, 0);
+            if (max_bounce > 0) {
+                XYZ reflected_slope = XYZ::reflect(slope, point_normal);
+                reflected_slope.normalize();
+                Ray reflection_ray = Ray(position.clone() + (point_normal * NEAR_THRESHOLD * 1000000), XYZ::flip(reflected_slope), scene,accelerator);
+#if LAZY_OBJECT_CHECKING
+                reflection_ray.focus = focus;
+                reflection_ray.full_check_threshold = full_check_threshold - distance_traveled;
+#endif
+                XYZ* returned_reflect = reflection_ray.emit(max_bounce - 1);
+                reflection_return = returned_object->material.calculate_BRDF(point_normal,   *returned_reflect, XYZ::flip(reflected_slope), XYZ::flip(slope));//calculate_light_bounce(returned_object,XYZ::flip(reflected_slope),reflection_ray.cast(max_bounce - 1),XYZ::flip(slope));//*returned_object->material.color;
+
+            }
+            vector<pair<XYZ, Primitive*>> lights;
+            for (int PLL_index = 0; PLL_index < accelerator->point_light_ptrs.size(); PLL_index++) {
+                Primitive* PLL_ptr = accelerator->point_light_ptrs.at(PLL_index)->host;
+                XYZ PLL_origin = accelerator->point_light_origins[PLL_index];
+                if (PLL_ptr == returned_object) {
+                    continue;
+                }
+                XYZ slope = XYZ::normalize(XYZ::slope(position, PLL_origin));
+                lights.push_back(pair<XYZ, Primitive*>(slope,PLL_ptr));
+            }
+            for (auto pointlike_light: scene->pointlike_lights) {
+                XYZ light_slope = XYZ::normalize(XYZ::slope(position,pointlike_light->origin));
+                Primitive* light_ptr = pointlike_light->host;
+                Ray light_ray = Ray(position.clone()+(point_normal*NEAR_THRESHOLD*10000000), light_slope, scene, accelerator);
+#if LAZY_OBJECT_CHECKING
+                light_ray.focus = focus;
+                light_ray.full_check_threshold = full_check_threshold-distance_traveled;
+#endif
+                bool light_hit =  light_ray.simple_cast();
+                1 + 1;
+
+                if(light_ray.first_primitive == light_ptr) {
+                    XYZ emitted_light = light_ray.calculate_light_emissions(light_ptr);// / pow(light_ray.distance_traveled, 2);
+                        //emitted_light = emitted_light/ pow(light_ray.distance_traveled, 2);
+                    diffuse_return += returned_object->material.calculate_BRDF(point_normal, emitted_light, light_slope,XYZ::flip(slope));//calculate_diffuse_bounce(returned_object,light_slope,emitted_light,XYZ::flip(slope));
+                }
+            }
+            //light_return = XYZ(0,0,0);
+            Material native_material = returned_object->material_properties_at(position);
+            XYZ native_emissions = native_material.emission * native_material.emissive_color;
+            //diffuse_return = XYZ(0,0,0);
+            //reflection_return = XYZ(0, 0, 0);
+            final_return = diffuse_return + reflection_return + native_emissions;//+native_material.color;
+            return new XYZ(final_return.X,final_return.Y,final_return.Z);
+        }
+        else {
+            return new XYZ(0,0,0);
+        }
+    }
+};
+*/
+struct PackagedRay {
+    XYZ position;
+    XYZ slope;
+    char remaining_bounces;
+    char remaining_monte_carlo;
+    bool check_lighting;
+    LL_precursor PreLL;
+    PackagedRay(XYZ _position, XYZ _slope, char bounces, bool _check_lighting, Forwarder<Luminance_Link>* LL_forward) :
+        position(_position), slope(_slope), remaining_bounces(bounces), check_lighting(_check_lighting), PreLL(LL_precursor(LL_forward)) {}
+    PackagedRay(XYZ _position, XYZ _slope, char bounces, bool _check_lighting, Forwarder<Luminance_Link>* LL_forward, XYZ coefficient) :
+        position(_position), slope(_slope), remaining_bounces(bounces), check_lighting(_check_lighting), PreLL(LL_precursor(LL_forward,coefficient)) {}
+    void move(decimal distance) {
+        position += slope * distance;
+    }
+};
+
+class Camera {
+    //Ill note this is a fairly non-direct class. the original was more streamlined, but I decided to update it to remove gunk
+    //and to allow progressive output updates during monte carlo rendering
+public:
+    XYZ position;
+    Scene* scene;
+    Accelerator* accelerator;
+
+    Lens* lens;
+    XYZ focal_position;
+
+    decimal gain = 1;
+
+    vector<vector<vector<XYZ*>>> ray_outputs;
+    vector<vector<XYZ*>> image_output;
+
+    int current_resolution_x;
+    int current_resolution_y;
+
+    Camera(Scene* _scene, XYZ _position, Lens* _lens, XYZ _focal_position) : scene(_scene),
+        lens(_lens), position(_position), focal_position(_focal_position) {}
+
+    void prep(int resolution_x, int resolution_y, Accelerator* _accelerator) {
+        accelerator = _accelerator;
+        current_resolution_x = resolution_x;
+        current_resolution_y = resolution_y;
+        lens->calculate_grid(resolution_x, resolution_y);
+        lens->calculate_vectors(resolution_x, resolution_y, focal_position);
+        for (int y_index = 0; y_index < resolution_y; y_index++) {
+            vector<XYZ*> output_row;
+            for (int x_index = 0; x_index < resolution_x; x_index++) {
+                output_row.push_back(new XYZ(0, 0, 0));
+            }
+            image_output.push_back(output_row);
+        }
+        for (int y_index = 0; y_index < resolution_y; y_index++) {
+            vector<vector<XYZ*>> output_row;
+            for (int x_index = 0; x_index < resolution_x; x_index++) {
+                vector<XYZ*> pixel_rays;
+                output_row.push_back(pixel_rays);
+            }
+            ray_outputs.push_back(output_row);
+        }
+    }
+    void emit_rays() {
+        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
+            vector<XYZ> slope_row = lens->slope_grid.at(y_index);
+            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
+                vector<XYZ*> pixel_rays;
+
+                XYZ& slope = slope_row.at(x_index);
+                Ray ray = Ray(position, slope.clone(), scene, accelerator);
+                XYZ* ray_output = ray.emit(5);
+
+                ray_outputs[y_index][x_index].push_back(ray_output);
+
+            }
+        }
+    }
+    void process_outputs_to_colors() {
+        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
+            vector<XYZ> slope_row = lens->slope_grid.at(y_index);
+            vector<vector<XYZ*>> output_row;
+            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
+                vector<XYZ*> rays = ray_outputs[y_index][x_index];
+                XYZ total_luminence = XYZ(0, 0, 0);
+                for (int i = 0; i < rays.size(); i++) {
+                    total_luminence += *rays[i];
+                }
+                XYZ average_luminence = total_luminence / rays.size();
+                
+                image_output[y_index][x_index] = new XYZ(average_luminence.X, average_luminence.Y, average_luminence.Z);//I know you should be able to just use &
+                //but im a bit paranoid after C++ kept freeing local objects I was pointerizing using &
+            }
+        }
+    }
+    void process_luminance_links_to_color(vector<vector<Luminance_Link*>>& links) {
+        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
+            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
+                XYZ output = links[y_index][x_index]->calculate_output();
+                image_output[y_index][x_index] = new XYZ(output.X,output.Y,output.Z);
+            }
+        }
+    }
+    void post_process() {
+        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
+            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
+                XYZ* luminence = image_output[y_index][x_index];
+                XYZ scaled_return = (*luminence) * gain;
+                if (scaled_return != XYZ(0, 0, 0)) {
+                    1 + 1;
+                }
+                //scaled_return = scaled_return*log10((scaled_return + 1).magnitude())/scaled_return.magnitude();//maybe more correct? dunno.
+                scaled_return = XYZ::log(scaled_return + 1);
+                scaled_return = XYZ::min(scaled_return, 255);
+                scaled_return = XYZ::max(scaled_return, 0.0);
+                image_output[y_index][x_index] = new XYZ(scaled_return.X, scaled_return.Y, scaled_return.Z);
+                delete luminence;
+            }
+        }
+    }
+};
+
+struct CastResults {
+    XYZ normal;
+    Material* material;
+    CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat) {}
+};
+
+class RayEngine {
+public:
+    vector<PackagedSphere> sphere_data; //stores primitives in a more packed data format for better cache optimizations.
+    vector<PackagedPlane> plane_data; //Ive made quite a few mistakes throughout this project but I think Im finally on track with this
+    vector<PackagedRay>* primary_cast_queue = new vector<PackagedRay>();
+    vector<PackagedRay>* secondary_cast_queue = new vector<PackagedRay>();
+    vector<bool> object_check_state;
+    vector<decimal> prev_distances;
+
+    vector<PointLikeLight> lights;
+    RayEngine() {}
+    void load_scene_objects(Scene* scene) {
+        for (auto s : scene->spheres) {
+            sphere_data.push_back(PackagedSphere(*s));
+            object_check_state.push_back(true);
+            prev_distances.push_back(0.0);
+        }
+        for (auto p : scene->planes) {
+            plane_data.push_back(PackagedPlane(*p));
+            object_check_state.push_back(true);
+            prev_distances.push_back(0.0);
+        }
+        for (auto PLL : scene->pointlike_lights) {
+            lights.push_back(*PLL);
+        }
+    }
+    vector<vector<Luminance_Link*>> enqueue_camera_slopes(Lens* lens, XYZ position, char bounces) {
+        int index = 0;
+        vector<vector<Luminance_Link*>> out;
+        for (auto row : lens->slope_grid) {
+            vector<Luminance_Link*> out_row;
+            for (auto slope : row) {
+                Luminance_Link* output_link = new Luminance_Link();
+                primary_cast_queue->push_back(PackagedRay(position, slope, bounces, true, output_link->my_link));
+                out_row.push_back(output_link);
+                index++;
+            }
+            out.push_back(out_row);
+        }
+        return out;
+    }
+    CastResults execute_ray_cast(XYZ& position, XYZ& slope) {
+        #define default_smallest_distance 9999999;
+        decimal distance_traveled = 0;
+        for (PackagedSphere& s : sphere_data) {
+            s.culled = false;
+            s.prev_distance = 999999;
+        }
+        for (PackagedPlane& p : plane_data) {
+            p.culled = false;
+            p.prev_distance = 999999;
+        }
+        void* focus;
+
+        int primary_type = -1;
+        
+
+        while (position.magnitude_noRT() < SCENE_BOUNDS * SCENE_BOUNDS) {
+            decimal smallest_distance = default_smallest_distance;
+            for (PackagedSphere& s : sphere_data) {
+                if (!OBJECT_CULLING || !s.culled) {
+                    float distance = Sphere::distance(s.origin, s.radius, position);
+                    if (distance < smallest_distance) {
+                        smallest_distance = distance;
+                    }
+                    if (distance < NEAR_THRESHOLD) {
+                        XYZ normal = Sphere::normal(s.origin, position);
+                        return CastResults(normal, s.material);
+                    }
+#if OBJECT_CULLING
+#if CULL_RECEDING_OBJECTS
+                    s.culled = s.prev_distance < distance;
+                    s.prev_distance = distance;
+#endif          
+#endif
+                }
+            }
+            for (PackagedPlane& p : plane_data) {
+                if (!OBJECT_CULLING || !p.culled) {
+                    float distance = Plane::distance(p.normal, p.origin_offset, position);
+                    if (distance < smallest_distance) {
+                        smallest_distance = distance;
+                    }
+                    if (distance < NEAR_THRESHOLD) {
+                        return CastResults(p.normal, p.material);
+                    }
+#if OBJECT_CULLING
+#if CULL_RECEDING_OBJECTS
+                    p.culled = p.prev_distance < distance;
+                    p.prev_distance = distance;
+#endif          
+#endif
+                }
+
+            }
+            position += smallest_distance * slope;
+            distance_traveled += smallest_distance;
+        }
+        return CastResults(XYZ(-1, -1, -1), nullptr);
+    }
+    void process_queue() {
+        for (int ray_index = 0; ray_index < primary_cast_queue->size(); ray_index++) {
+            PackagedRay& ray_data = primary_cast_queue->at(ray_index);
+            CastResults results = execute_ray_cast(ray_data.position, ray_data.slope);
+            if (results.material == nullptr) {
+                ray_data.PreLL.value = XYZ(10,10,10);
+            }
+            else {
+                ray_data.PreLL.value = results.material->calculate_emissions();
+                //ray_data.PreLL.value = XYZ(0, 0, 100);
+                if (ray_data.remaining_bounces > 0) {
+                    XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), results.normal);
+                    XYZ return_coefficient = results.material->calculate_BRDF_coefficient(results.normal, reflection_slope, XYZ::flip(ray_data.slope));
+                    secondary_cast_queue->push_back(PackagedRay(
+                        ray_data.position+NEAR_THRESHOLD*results.normal*2,
+                        reflection_slope,
+                        ray_data.remaining_bounces - 1,
+                        true,
+                        ray_data.PreLL.my_link,
+                        return_coefficient
+                    ));
+                }
+                if (ray_data.check_lighting) {
+                    for (PointLikeLight PLL : lights) {
+                        XYZ light_slope = XYZ::slope(ray_data.position, PLL.origin);
+                        XYZ return_coefficient = results.material->calculate_BRDF_coefficient(results.normal, light_slope, XYZ::flip(ray_data.slope));
+                        secondary_cast_queue->push_back(PackagedRay(
+                            ray_data.position + NEAR_THRESHOLD * results.normal * 2,
+                            light_slope,
+                            0,
+                            false,
+                            ray_data.PreLL.my_link,
+                            return_coefficient
+                        ));
+
+                    }
+                }
+                
+            }
+
+        }
+        primary_cast_queue->clear();
+        auto primary_queue_ptr = primary_cast_queue;
+        primary_cast_queue = secondary_cast_queue;
+        secondary_cast_queue = primary_queue_ptr;
+    }
+};
+
+
+class SceneManager {
+public:
+    Camera* camera;
+    Scene* scene;
+    Accelerator* accelerator;
+    sf::RenderWindow* window;
+    RayEngine RE;
+
+    int current_resolution_x = 0;
+    int current_resolution_y = 0;
+    SceneManager(Camera* _camera, Scene* _scene):
+    camera(_camera), scene(_scene), accelerator(new Accelerator(_scene))
+    {
+    }
+    void render(int resolution_x, int resolution_y) {
+        current_resolution_x = resolution_x;
+        current_resolution_y = resolution_y;
+
+
+        prep();
+        auto LL_field = enqueue_rays();
+        cout <<endl << "+RAYCASTING+" << endl;
+        while (RE.primary_cast_queue->size() > 0) {
+            fire_casting_event();
+        }
+        cout << endl << "+POST-PROCESSING+" << endl;
+        //emit_rays();
+        post_process_LL(LL_field);
+        create_window();
+        draw();
+
+    }
+private:
+    void prep() {
+        accelerator->prep(scene->spheres, scene->planes, scene->pointlike_lights);
+
+        cout << "Prepping camera.........." << flush;
+
+        auto camera_prep_start = chrono::high_resolution_clock::now();
+        camera->prep(current_resolution_x, current_resolution_y, accelerator);
+        RE.load_scene_objects(scene);
+        auto camera_prep_end = chrono::high_resolution_clock::now();
+
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(camera_prep_end - camera_prep_start).count() << "ms]" << endl;
+
+    }
+    vector<vector<Luminance_Link*>> enqueue_rays() {
+        cout << "Queueing Rays............" << flush;
+
+        auto queue_start = chrono::high_resolution_clock::now();
+        auto LL_array = RE.enqueue_camera_slopes(camera->lens, camera->focal_position+camera->position, 8);
+        auto queue_end = chrono::high_resolution_clock::now();
+
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(queue_end-queue_start).count() << "ms]" << endl;
+        return LL_array;
+    }
+    void fire_casting_event() {
+        cout << "Running casting cycle...." << flush;
+
+        auto emit_rays_start = chrono::high_resolution_clock::now();
+        RE.process_queue();
+        auto emit_rays_end = chrono::high_resolution_clock::now();
+
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(emit_rays_end - emit_rays_start).count() << "ms]" << endl;
+    }
+    void emit_rays() {
+        cout << "Emitting rays....." << flush;
+
+        auto emit_rays_start = chrono::high_resolution_clock::now();
+        camera->emit_rays();
+        auto emit_rays_end = chrono::high_resolution_clock::now();
+
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(emit_rays_end - emit_rays_start).count() << "ms]" << endl;
+    }
+    void post_process_LL(vector<vector<Luminance_Link*>>& LL_array) {
+        cout << "Post-Processing..." << flush;
+        auto post_processing_start = chrono::high_resolution_clock::now();
+        camera->process_luminance_links_to_color(LL_array);
+        auto post_processing_end = chrono::high_resolution_clock::now();
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(post_processing_end - post_processing_start).count() << "ms]" << endl;
+    }
+    void post_process() {
+        cout << "Post-Processing..." << flush;
+        auto post_processing_start = chrono::high_resolution_clock::now();
+        camera->process_outputs_to_colors();
+        auto post_processing_end = chrono::high_resolution_clock::now();
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(post_processing_end - post_processing_start).count() << "ms]" << endl;
+    }
+    void create_window() {
+        cout << "Opening Window...." << flush;
+        window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * PIXEL_SCALAR, current_resolution_y * PIXEL_SCALAR), "Render Window!");
+        cout << "Done" << endl;
+    }
+    void draw() {
+        cout << "Drawing..........." << flush;
+        auto drawing_start = chrono::high_resolution_clock::now();
+
+        sf::RectangleShape rectangle(sf::Vector2f(PIXEL_SCALAR, PIXEL_SCALAR));
+        for (int row_index = 0; row_index < camera->image_output.size(); row_index++) {
+            vector<XYZ*> image_row = camera->image_output.at(row_index);
+            for (int column_index = 0; column_index < image_row.size(); column_index++) {
+                XYZ* pixel_data = image_row.at(column_index);
+                rectangle.setFillColor(sf::Color(pixel_data->X, pixel_data->Y, pixel_data->Z));
+                rectangle.setPosition(column_index * PIXEL_SCALAR, row_index * PIXEL_SCALAR);
+                window->draw(rectangle);
+            }
+        }
+        window->display();
+        auto drawing_end = chrono::high_resolution_clock::now();
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(drawing_end - drawing_start).count() << "ms]" << endl;
+
+        while (window->isOpen())
+        {
+            sf::Event event;
+            while (window->pollEvent(event))
+            {
+                if (event.type == sf::Event::Closed)
+                    window->close();
+            }
+        }
+
+
+    }
+};
+
+
+/*
+Scene* load_cornell_box() {
+    Spatial_Cube* scene = new Spatial_Cube(100, XYZ(0, 0, 0));
+
+    
+
+    decimal size = 1;
+
+    decimal scalar = size / 555;
+
+    decimal box_width = 555*scalar;
+    decimal wall_offset = box_width / 2;
+
+    int res_scalar = 10;
+    int resolution_x = 108 * res_scalar;
+    int resolution_y = 108 * res_scalar;
+    Lens lens = RectLens(resolution_x, resolution_y, 0.025*scalar, resolution_y / resolution_x);
+    Camera* camera = new Camera(scene, XYZ(0, 0, -800*scalar), lens);
+
+    Material wall_left_mat = Material(XYZ(0, 0.5, 0.1));
+    wall_left_mat.roughness = 0.5;
+    wall_left_mat.specular = 0;
+    Plane* wall_left = new Plane(XYZ(1, 0, 0), XYZ(-wall_offset, 0, 0), wall_left_mat);
+
+    Material wall_right_mat = Material(XYZ(0.7,0,0));
+    wall_right_mat.roughness = 0.5;
+    wall_right_mat.specular = 0;
+    Plane* wall_right = new Plane(XYZ(-1, 0, 0), XYZ(wall_offset, 0, 0), wall_right_mat);
+
+    Material blank_wall_mat = Material(XYZ(1, 1, 1));
+    blank_wall_mat.roughness = 0.2;
+    blank_wall_mat.specular = 0.9;
+    
+    Plane* top_wall = new Plane(XYZ(0, -1, 0), XYZ(0, wall_offset, 0), blank_wall_mat);
+    Plane* bottom_wall = new Plane(XYZ(0, 1, 0), XYZ(0, -wall_offset, 0), blank_wall_mat);
+    Plane* back_wall = new Plane(XYZ(0, 0, -1), XYZ(0, 0, wall_offset), blank_wall_mat);
+
+    Material light_mat;
+    light_mat.color = XYZ(1, 1, 1);
+    light_mat.emission = 10;
+    light_mat.emissive_color = XYZ(1, 0.662, 0.341);
+    Sphere* glow_sphere = new Sphere(0.05, XYZ(0, 0, 0), light_mat);
+
+    scene->register_object(wall_right);
+    scene->register_object(wall_left);
+    scene->register_object(back_wall);
+    scene->register_object(top_wall);
+    scene->register_object(bottom_wall);
+    scene->register_object(glow_sphere);
+
+    return pair<Camera*, Spatial_Cube*>(camera, scene);
+}
+*/
+SceneManager* load_default_scene() {
+
+    Scene* scene = new Scene();
+
+    Lens* lens = new RectLens(3, 0.5625);
+    Camera* camera = new Camera(scene, XYZ(0, 0, -9), lens , XYZ(0,0,-1));
+
+
+    vector<Sphere*> spheres;
+    int n_sphere = 10;
+    decimal max_pos = 7;
+    decimal min_radius = 0.3;
+    decimal max_radius = 1;
+    for (int i = 0; i < n_sphere; i++) {
+        decimal radius = fRand(min_radius, max_radius);
+        decimal x = fRand(-max_pos, max_pos);
+        decimal y = fRand(-max_pos, max_pos);
+        decimal z = fRand(-max_pos, max_pos);
+        decimal r = fRand(0, 1);
+        decimal g = fRand(0, 1);
+        decimal b = fRand(0, 1);
+        XYZ origin = XYZ(x, y, z);
+        Material mat = Material(XYZ(r, g, b));
+        mat.roughness = 1;
+        Sphere* sphere =new Sphere(radius, origin, mat);
+        spheres.push_back(sphere);
+
+    }
+
+    Material sphere_mat;
+    sphere_mat.color = XYZ(1, 0, 0);//XYZ(0.24725, 0.1995, 0.0745);
+    sphere_mat.specular = 0.5;
+    sphere_mat.metallic = 1;
+    sphere_mat.roughness = 0.4;
+    Sphere* my_sphere =new Sphere(0.9, XYZ(0, 0, 0), sphere_mat);
+
+    Material light_mat;
+    light_mat.color = XYZ(1, 1, 1);
+    light_mat.emission = 500;
+    //light_mat.emissive_color = XYZ(1, 1, 1);
+    light_mat.emissive_color = XYZ(1, 0.662, 0.341);
+    Sphere* glow_sphere =new Sphere(1, XYZ(0, 20, 0), light_mat);
+
+
+    Material floor_mat;
+    floor_mat.color = XYZ(1, 1, 1);
+    floor_mat.roughness = 0.6;
+    floor_mat.specular = 0.6;
+    Plane* floor =new Plane(XYZ(0, 1, 0), XYZ(0, -4, 0), floor_mat);
+
+
+    scene->register_sphere(my_sphere);
+    scene->register_sphere(glow_sphere);
+    scene->register_plane(floor);
+    for (int i = 0; i < spheres.size(); i++) {
+        scene->register_sphere(spheres.at(i));
+    }
+
+    SceneManager* SM = new SceneManager(camera, scene);
+
+    return SM;
+}
+
+int main()
+{
+    srand(0);
+
+    SceneManager* scene_manager = load_default_scene();
+
+
+
+    //exit(0);
+
+    //srand(time(NULL));
+    
+   // return pair<Camera&, Spatial_Cube&>(*camera, *scene);
+   
+    scene_manager->render(1920,1080);
+
+    /*
+    cout<< "Number of objects: " << scene->contents.size() << endl;
+
+    scene->prep();
+    cout << "Spatial Cube prepped." << endl;
+    cout << "subdividing spatial cube..." << flush;
+    auto start_sub = chrono::high_resolution_clock::now();
+    int subdivisions = 0;
+    //subdivisions = guiding_grid.subdivide(4);
+    auto end_sub = chrono::high_resolution_clock::now();
+    cout << "done in " << chrono::duration_cast<chrono::microseconds>(end_sub - start_sub).count()/1000 << "ms\n" << endl;
+    cout << subdivisions << " subdivisions generated" << endl;
+    //cout << guiding_grid.diagnose(false, 0) << endl;
+ 
+    int res_x = camera->lens.resolution_x;
+    int res_y = camera->lens.resolution_y;
+
+    sf::RenderWindow window(sf::VideoMode(res_x*PIXEL_SCALAR,res_y*PIXEL_SCALAR), "Render Window!");
+    
+   
+
+    cout << scene->contents.size() << endl;
+    auto start_render = chrono::high_resolution_clock::now();
+    cout << "Rendering at " << res_x << "x" << res_y << ":" << PIXEL_SCALAR << endl;
+    cout << "calculating render..." << flush;
+    //auto render_raw = camera->render(XYZ(0,0,-0.035*(1.0/1000)));
+    auto render_raw = camera->render(XYZ(0, 0, -1));
+    auto end_render = chrono::high_resolution_clock::now();
+    cout << "done in " << chrono::duration_cast<chrono::milliseconds>(end_render - start_render).count() <<"ms" << endl;
+    cout << "drawing..." << flush;
+    draw(window, render_raw);
+    */
+    
+
+
+    /*while (window.isOpen())
+    {
+        sf::Event event;
+        while (window.pollEvent(event))
+        {
+            if (event.type == sf::Event::Closed)
+                window.close();
+        }
+
+        window.clear();
+        window.display();
+    }*/
+
+}
+
+// Run program: Ctrl + F5 or Debug > Start Without Debugging menu
+// Debug program: F5 or Debug > Start Debugging menu
+
+// Tips for Getting Started: 
+//   1. Use the Solution Explorer window to add/manage files
+//   2. Use the Team Explorer window to connect to source control
+//   3. Use the Output window to see build output and other messages
+//   4. Use the Error List window to view errors
+//   5. Go to Project > Add New Item to create new code files, or Project > Add Existing Item to add existing code files to the project
+//   6. In the future, to open this project again, go to File > Open > Project and select the .sln file
