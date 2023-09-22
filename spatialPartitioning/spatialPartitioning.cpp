@@ -17,7 +17,7 @@
 #include <cassert>
 #include <intrin.h>
 
-#define PIXEL_SCALAR 2
+#define PIXEL_SCALAR 1
 #define assertm(exp, msg) assert(((void)msg, exp))
 #define SMALL 0.001
 #define NEAR_THRESHOLD 0.001
@@ -30,6 +30,10 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 
 #define PI 3.1415
+
+#define kEpsilon 0.0001
+
+#define FULL_BRIGHT false
 
 #define OBJECT_CULLING true
 #define CULL_RECEDING_OBJECTS true
@@ -854,6 +858,65 @@ public:
     PointLikeLight(XYZ _origin, decimal _radius, Primitive* _host) : origin(_origin), radius(_radius), host(_host) {}
 };
 
+struct PackagedTri { //reduced memory footprint to improve cache perf
+    XYZ p1;
+    XYZ p2;
+    XYZ p3;
+    XYZ normal;
+    XYZ p1p3;
+    XYZ p1p2;
+    Material* material;
+    PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material& _material) {
+        material = &_material;
+        p1 = p1o + origin;
+        p2 = p2o + origin;
+        p3 = p3o + origin;
+        p1p3 = p3 - p1;
+        p1p2 = p2 - p1;
+        normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
+    }
+};
+
+class Tri :public Primitive {
+public:
+    XYZ p1o;
+    XYZ p2o;
+    XYZ p3o;
+    XYZ origin;
+    Tri(XYZ _origin, XYZ _p1o, XYZ _p2o, XYZ _p3o, Material _material) : Primitive(_material),
+        origin(_origin), p1o(_p1o), p2o(_p2o), p3o(_p3o) {}
+    //https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/moller-trumbore-ray-triangle-intersection.html
+    static decimal intersection_check_MoTru(const PackagedTri& T, const XYZ& position, const XYZ& slope){
+        XYZ pvec = XYZ::cross(slope,T.p1p3);
+        decimal det = XYZ::dot(T.p1p2,pvec);
+        // if the determinant is negative, the triangle is 'back facing'
+        // if the determinant is close to 0, the ray misses the triangle
+        //if (det < kEpsilon) return false;
+        // ray and triangle are parallel if det is close to 0
+        if (fabs(det) < kEpsilon) return -1;
+        decimal invDet = 1 / det;
+
+        XYZ tvec = position - T.p1;
+        decimal u = XYZ::dot(tvec,pvec) * invDet;
+        if (u < 0 || u > 1) return -1;
+
+        XYZ qvec = XYZ::cross(tvec,T.p1p2);
+        decimal v = XYZ::dot(slope,qvec) * invDet;
+        if (v < 0 || u + v > 1) return -1;
+
+        decimal t = XYZ::dot(T.p1p3,qvec) * invDet;
+        return t;
+    }
+    static decimal intersection_check(const PackagedTri& T, const XYZ& position, const XYZ& slope) {
+        return intersection_check_MoTru(T, position, slope);
+    }
+    static XYZ get_normal(XYZ normal, XYZ position) {
+        return (XYZ::dot(normal, position) > 0) ? normal : -normal;
+    }
+};
+
+
+
 class Sphere : public Primitive {
 public:
     decimal radius = 0;
@@ -920,8 +983,6 @@ struct PackagedSphere { //reduced memory footprint to improve cache perf
     decimal radius;
     XYZ origin;
     Material* material;
-    bool culled;
-    decimal prev_distance;
     PackagedSphere(Sphere& sphere) {
         radius = sphere.radius;
         origin = sphere.origin;
@@ -968,8 +1029,6 @@ struct PackagedPlane {
     XYZ normal;
     XYZ origin_offset;
     Material* material;
-    bool culled;
-    decimal prev_distance;
     PackagedPlane(Plane& plane) {
         normal = plane.normal;
         origin_offset = plane.origin_offset;
@@ -1082,6 +1141,7 @@ public:
     int object_count = 0;
     vector<Sphere*> spheres;
     vector<Plane*> planes;
+    vector<Tri*> tris;
 
     vector<PointLikeLight*> pointlike_lights;
 
@@ -1102,6 +1162,12 @@ public:
         object_count++;
         plane->material.prep();
         planes.push_back(plane);
+    }
+
+    void register_tri(Tri* tri) {
+        object_count++;
+        tri->material.prep();
+        tris.push_back(tri);
     }
 
     
@@ -1440,14 +1506,34 @@ struct Casting_Diagnostics {
     chrono::nanoseconds duration;
 };
 
+
+
 //#define RAY_BLOCK_SIZE 65536
 #define RAY_BLOCK_SIZE 16*4
 typedef DataBlock<PackagedRay,RAY_BLOCK_SIZE> Ray_Block;
+typedef DataBlock<XYZ, RAY_BLOCK_SIZE> Render_Block;
+
+struct render_pair {
+    int index = 0;
+    Ray_Block* ray_data;
+    Render_Block* render_outputs;
+    bool is_full() {
+        return index < RAY_BLOCK_SIZE;
+    }
+    XYZ* get_output() {
+        return &((*render_outputs).get_ref(index));
+    }
+    void enqueue_ray(PackagedRay& ray) {
+        ray_data->enqueue(ray);
+        index++;
+    }
+};
 
 class RayEngine {
 public:
     vector<PackagedSphere> sphere_data; //stores primitives in a more packed data format for better cache optimizations.
     vector<PackagedPlane> plane_data; //Ive made quite a few mistakes throughout this project but I think Im finally on track with this
+    vector<PackagedTri> tri_data;
     Ray_Block* enqueuement_block;
     int enqueuement_index = 0;
     vector<Ray_Block*> queue_stack = vector<Ray_Block*>();
@@ -1480,6 +1566,11 @@ public:
         }
         for (auto p : scene->planes) {
             plane_data.push_back(PackagedPlane(*p));
+            object_check_state.push_back(true);
+            prev_distances.push_back(0.0);
+        }
+        for (auto t : scene->tris) {
+            tri_data.push_back(PackagedTri(t->p1o,t->p2o,t->p3o,t->origin,t->material));
             object_check_state.push_back(true);
             prev_distances.push_back(0.0);
         }
@@ -1519,7 +1610,7 @@ public:
             for (auto slope : row) {
                 XYZ* output_link = new XYZ();
                 int monte_bounce_count = 2;
-                auto ray = PackagedRay(position, slope, XYZ(1,1,1), output_link, bounces, 2, 256, 256, true);
+                auto ray = PackagedRay(position, slope, XYZ(1,1,1), output_link, bounces, 2, 128, 256, true);
                 enqueue_ray(ray);
                 mark_enqueuement_expensive(monte_bounce_count+1);
                 out_row.push_back(output_link);
@@ -1553,64 +1644,18 @@ public:
                 }
             }
         }
+        for (PackagedTri& t : tri_data) {
+            decimal distance = Tri::intersection_check(t, position, slope);
+            if (distance >= 0) {
+                if (distance < smallest_distance) {
+                    smallest_distance = distance;
+                    returner.normal = Tri::get_normal(t.normal,position);
+                    returner.material = t.material;
+                }
+            }
+        }
         position += smallest_distance * slope;
         return returner;
-    }
-    CastResults execute_ray_march(XYZ& position, XYZ& slope) {
-        #define default_smallest_distance 9999999;
-        decimal distance_traveled = 0;
-        for (PackagedSphere& s : sphere_data) {
-            s.culled = false;
-            s.prev_distance = 999999;
-        }
-        for (PackagedPlane& p : plane_data) {
-            p.culled = false;
-            p.prev_distance = 999999;
-        }
-        
-
-        while (position.magnitude_noRT() < SCENE_BOUNDS * SCENE_BOUNDS) {
-            decimal smallest_distance = default_smallest_distance;
-            for (PackagedSphere& s : sphere_data) {
-                if (!OBJECT_CULLING || !s.culled) {
-                    decimal distance = Sphere::distance(s.origin, s.radius, position);
-                    if (distance < smallest_distance) {
-                        smallest_distance = distance;
-                    }
-                    if (distance < NEAR_THRESHOLD) {
-                        XYZ normal = Sphere::normal(s.origin, position);
-                        return CastResults(normal, s.material);
-                    }
-#if OBJECT_CULLING
-#if CULL_RECEDING_OBJECTS
-                    s.culled = s.prev_distance < distance;
-                    s.prev_distance = distance;
-#endif          
-#endif
-                }
-            }
-            for (PackagedPlane& p : plane_data) {
-                if (!OBJECT_CULLING || !p.culled) {
-                    decimal distance = Plane::distance(p.normal, p.origin_offset, position);
-                    if (distance < smallest_distance) {
-                        smallest_distance = distance;
-                    }
-                    if (distance < NEAR_THRESHOLD) {
-                        return CastResults(p.normal, p.material);
-                    }
-#if OBJECT_CULLING
-#if CULL_RECEDING_OBJECTS
-                    p.culled = p.prev_distance < distance;
-                    p.prev_distance = distance;
-#endif          
-#endif
-                }
-
-            }
-            position += smallest_distance * slope;
-            distance_traveled += smallest_distance;
-        }
-        return CastResults(XYZ(-1, -1, -1), nullptr);
     }
     void process_ray(Casting_Diagnostics& stats, PackagedRay& ray_data) {
         stats.rays_processed++;
@@ -1630,6 +1675,10 @@ public:
             Quat normal_rot = Quat::makeRotation(XYZ(0, 1, 0), results.normal);
             Quat reflection_rot = Quat::makeRotation(XYZ(0,1,0),reflection_slope);
             //ray_data.PreLL.value = XYZ(0, 0, 100);
+            
+            if (FULL_BRIGHT) {
+                (*ray_data.output)+= results.material->color;
+            }
             if (ray_data.remaining_bounces > 0) {
                 if (ray_data.remaining_monte_carlo > 0) {
                     for (int i = 0; i < bounce_count; i++) {
@@ -1814,7 +1863,7 @@ private:
         cout << "Queueing Rays............" << flush;
 
         auto queue_start = chrono::high_resolution_clock::now();
-        auto LL_array = RE.enqueue_camera_slopes(camera, camera->focal_position+camera->position, 5);
+        auto LL_array = RE.enqueue_camera_slopes(camera, camera->focal_position+camera->position, 4);
         auto queue_end = chrono::high_resolution_clock::now();
 
         cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(queue_end-queue_start).count() << "ms]" << endl;
@@ -2026,12 +2075,20 @@ SceneManager* load_default_scene() {
     sphere_2_mat.metallic = 0;
     sphere_2_mat.roughness = 1;
     Sphere* my_sphere_2 = new Sphere(0.4, XYZ(-0.9, -0.6, -0.7), sphere_2_mat);
+    //Sphere* my_sphere_2 = new Sphere(0.4, XYZ(0, -0.6, 0.5), sphere_2_mat);
+
+    Material tri_mat;
+    tri_mat.color = XYZ(1, 0.5, 1);//XYZ(0.24725, 0.1995, 0.0745);
+    tri_mat.specular = 0.8;
+    tri_mat.metallic = 0;
+    tri_mat.roughness = 0.05;
+    Tri* my_tri = new Tri(XYZ(2, 0, 0), XYZ(3, -0.7, -3), XYZ(0, 3, 0), XYZ(-3, -0.7, 3), tri_mat);
 
     Material light_mat;
     light_mat.color = XYZ(1, 1, 1);
     light_mat.emission = 5000;
-    //light_mat.emissive_color = XYZ(1, 1, 1);
-    light_mat.emissive_color = XYZ(1, 0.662, 0.341);
+    light_mat.emissive_color = XYZ(1, 1, 1);
+    //light_mat.emissive_color = XYZ(1, 0.662, 0.341);
     Sphere* glow_sphere =new Sphere(1, XYZ(-3, 2, 0), light_mat);
 
 
@@ -2045,6 +2102,8 @@ SceneManager* load_default_scene() {
 
     scene->register_sphere(my_sphere);
     scene->register_sphere(my_sphere_2);
+
+    scene->register_tri(my_tri);
 
     scene->register_sphere(glow_sphere);
     scene->register_plane(floor);
