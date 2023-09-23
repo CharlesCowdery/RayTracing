@@ -13,11 +13,12 @@
 #include <functional>
 #include <fstream>
 #include <array>
+#include <unordered_set>
+#include <thread>
 
 #include <cassert>
 #include <intrin.h>
 
-#define PIXEL_SCALAR 1
 #define assertm(exp, msg) assert(((void)msg, exp))
 #define SMALL 0.001
 #define NEAR_THRESHOLD 0.001
@@ -207,7 +208,63 @@ string intToEng(int inum, bool force_small = false) {
     }
 }
 
+struct iXY {
+    int X;
+    int Y;
+    iXY() :X(0), Y(0) {}
+    iXY(int _x, int _y) : X(_x), Y(_y) {}
+    iXY operator+(const iXY& other) const {
+        return iXY(X + other.X, Y + other.Y);
+    }
+    iXY operator-(const iXY& other) const {
+        return iXY(X - other.X, Y - other.Y);
+    }
+    bool operator==(const iXY& other) const
+    {
+        if (X == other.X && Y == other.Y) return true;
+        else return false;
+    }
 
+    struct HashFunction
+    {
+        size_t operator()(const iXY& coord) const
+        {
+            size_t xHash = std::hash<int>()(coord.X);
+            size_t yHash = std::hash<int>()(coord.Y) << 1;
+            return xHash ^ yHash;
+        }
+    };
+    typedef unordered_set<iXY, iXY::HashFunction> set;
+};
+
+struct XY {
+    decimal X;
+    decimal Y;
+    XY() :X(0), Y(0) {}
+    XY(decimal _x, decimal _y) : X(_x), Y(_y) {}
+    XY operator+(const XY& other) const {
+        return XY(X + other.X, Y + other.Y);
+    }
+    XY operator-(const XY& other) const {
+        return XY(X - other.X, Y - other.Y);
+    }
+    bool operator==(const XY& other) const
+    {
+        if (X == other.X && Y == other.Y) return true;
+        else return false;
+    }
+
+    struct HashFunction
+    {
+        size_t operator()(const XY& coord) const
+        {
+            size_t xHash = std::hash<int>()(coord.X);
+            size_t yHash = std::hash<int>()(coord.Y) << 1;
+            return xHash ^ yHash;
+        }
+    };
+    typedef unordered_set<XY, XY::HashFunction> set;
+};
 
 struct XYZ {
 public:
@@ -216,6 +273,8 @@ public:
     decimal Z;
     XYZ() : X(0), Y(0), Z(0) {}
     XYZ(decimal _X, decimal _Y, decimal _Z) : X(_X), Y(_Y), Z(_Z) {}
+    XYZ(XY xy, decimal _Z) : X(xy.X), Y(xy.Y), Z(_Z) {}
+    XYZ(XY xy) : XYZ(xy, 0) {}
     XYZ clone() {
         return XYZ(X, Y, Z);
     }
@@ -530,6 +589,9 @@ struct Quat : public XYZ {
         );
     }
 };
+
+
+
 
 decimal Ssin(decimal theta) {
     return theta - (theta * theta * theta) / 6 + (theta * theta * theta * theta * theta) / 120;
@@ -1048,24 +1110,18 @@ class Mesh{
     }
 };
 
-
 class Lens {
 public:
-    vector<vector<XYZ>> output_grid;
-    vector<vector<XYZ>> slope_grid;
-    void (*_calculate_grid)(Lens* self, int resolution_x, int resolution_y);
-    void calculate_vectors(int resolution_x, int resolution_y, XYZ focal_position) {
-        for (vector<XYZ>& row : output_grid) {
-            vector<XYZ> output_row;
-            for (XYZ& lens_pos : row) {
-                XYZ slope = lens_pos - focal_position;
-                output_row.push_back(XYZ::normalize(slope));
-            }
-            slope_grid.push_back(output_row);
-        }
+    int resolution_x;
+    int resolution_y;
+    int subdivision_size;
+    void (*_prep)(Lens* self, int resolution_x, int resolution_y, int subdivision_size);
+    XYZ (*_at)(Lens* self, int p_x, int p_y, int sample_index);
+    void prep(int resolution_x, int resolution_y, int subdivision_size) {
+        _prep(this, resolution_x, resolution_y, subdivision_size);
     }
-    void calculate_grid(int resolution_x, int resolution_y) {
-        _calculate_grid(this, resolution_x, resolution_y);
+    XYZ at(int p_x, int p_y, int sample_index) {
+        return _at(this, p_x, p_y, sample_index);
     }
 
 };
@@ -1073,63 +1129,52 @@ public:
 class RectLens : public Lens {
 public:
     decimal width;
-    decimal vertical_ratio;
-    RectLens(decimal _width, decimal _vertical_ratio) : width(_width), vertical_ratio(_vertical_ratio) {
-        _calculate_grid = _calculate_grid_function;
+    decimal height;
+    vector<XY> subdiv_offsets;
+    vector<vector<XY>> outputs;
+    RectLens(decimal _width, decimal _height) :
+        width(_width), height(_height) {
+        _at = _at_function;
+        _prep = _prep_function;
     }
-    static void _calculate_grid_function(Lens* self, int resolution_x, int resolution_y) {
+private:
+    static void _prep_function(Lens* self, int resolution_x, int resolution_y, int subdivision_count) {
         RectLens* self_rect = (RectLens*)self;
-        self_rect->output_grid.clear();
-        decimal height = self_rect->width * self_rect->vertical_ratio;
-        decimal partial_width = self_rect->width / resolution_x;
+        decimal width = self_rect->width;
+        decimal height = self_rect->height;
+        decimal partial_width =  width / resolution_x;
         decimal partial_height = height / resolution_y;
-        for (int y = 0; y < resolution_y; y++) {
-            vector<XYZ> output_row;
-            for (int x = 0; x < resolution_x; x++) {
-                output_row.push_back(XYZ(x * partial_width - self_rect->width / 2 + partial_width / 2, -y * partial_height + height / 2 - partial_height / 2, 0));
+        decimal offset_x = -width / 2;
+        decimal offset_y = -height / 2;
+        decimal subdiv_width_x = partial_width / subdivision_count;
+        decimal subdiv_width_y = partial_height / subdivision_count;
+        for (int y = 0; y < subdivision_count; y++) {
+            for (int x = 0; x < subdivision_count; x++) {
+                self_rect->subdiv_offsets.push_back(XY(
+                    subdiv_width_x * (x + 0.5),
+                    subdiv_width_y * (y + 0.5)
+                ));
             }
-            self->output_grid.push_back(output_row);
         }
+        for (int y = 0; y < resolution_y; y++) {
+            vector<XY> row;
+            for (int x = 0; x < resolution_x; x++) {
+                decimal final_x = offset_x + partial_width * x;
+                decimal final_y = offset_y + partial_height * y;
+                row.push_back(XY(
+                    final_x,
+                    final_y
+                ));
+            }
+            self_rect->outputs.push_back(row);
+        }
+
+    }
+    static XYZ _at_function(Lens* self, int p_x, int p_y, int sample_index) {
+        RectLens* self_rect = (RectLens*)self;
+        return XYZ(self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index]);   
     }
 };
-
-class Scene ;
-class Ray ;
-
-class Accelerator {
-public:
-    Scene* scene;
-
-    vector<XYZ>sphere_origins;
-    vector<decimal>sphere_radius;
-    vector<Sphere*>sphere_ptrs;
-
-    vector<XYZ>plane_normals;
-    vector<XYZ>plane_offsets;
-    vector<Plane*>plane_ptrs;
-
-    vector<XYZ>point_light_origins;
-    vector<PointLikeLight*>point_light_ptrs;
-    Accelerator(Scene* _scene) : scene(_scene) {};
-
-    void prep(vector<Sphere*> spheres, vector<Plane*> planes, vector<PointLikeLight*> pointlike_lights) {
-        for (Sphere* sphere : spheres) {
-            sphere_origins.push_back(sphere->origin.clone());
-            sphere_radius.push_back(sphere->radius);
-            sphere_ptrs.push_back(sphere);
-        }
-        for (Plane* plane : planes) {
-            plane_normals.push_back(plane->normal.clone());
-            plane_offsets.push_back(plane->origin_offset.clone());
-            plane_ptrs.push_back(plane);
-        }
-        for (PointLikeLight* PLL : pointlike_lights) {
-            point_light_origins.push_back(PLL->host->origin);
-            point_light_ptrs.push_back(PLL);
-        }
-    }
-};
-
 
 class Scene {
 public:
@@ -1175,81 +1220,6 @@ private:
     
 };
 
-template <typename T> struct Forwarder {
-    T* ptr;
-    Forwarder(T* point_to) :ptr(point_to) {}
-};
-
-struct Luminance_Link {
-    vector<Luminance_Link*>backward_links;
-    Luminance_Link* forward_link;
-    Forwarder<Luminance_Link>* my_link = nullptr;
-    XYZ my_value;
-    XYZ my_coefficient;
-    Luminance_Link() {
-        my_link = new Forwarder<Luminance_Link>(this);
-        my_coefficient = XYZ(1, 1, 1);
-    }
-    Luminance_Link(XYZ value, XYZ coefficient, Luminance_Link* _forward_link, Forwarder<Luminance_Link>* my_l) :
-        my_value(value), my_coefficient(coefficient), forward_link(_forward_link), my_link(my_l) {}
-
-    XYZ calculate_output() {
-        XYZ out = XYZ(0,0,0);
-        for (auto LuLi : backward_links) {
-            out+=LuLi->calculate_output();
-        }
-        return out * my_coefficient+my_value*my_coefficient;
-    }
-    void destroy_forwarder() {
-        if (my_link != nullptr) {
-            delete my_link;
-            my_link = nullptr;
-        }
-    }
-    ~Luminance_Link(){
-        for (auto LuLi : backward_links) {
-            delete LuLi;
-        }
-        destroy_forwarder();
-    }
-};
-
-//This exists to be a fixed size object for use in ray pacakges. when the ray is freed, this creates a luminance link, and relinks the associated links. 
-//uses a pointer pointer so that any other links pointing at it will be able to find it after it is destroyed into a real LL. When it is destroyed it updates the pointer address
-
-//I cannot emphasize this enough, this was BORN to leak memory
-//If I made this wrong, or its not used right, it will leak memory. no question about it
-struct LL_precursor { 
-    Forwarder<Luminance_Link>* forward_link;
-    Forwarder<Luminance_Link>* my_link;
-    XYZ coefficient = XYZ(1,1,1);
-    XYZ value = XYZ(-1,-1,-1);
-
-    LL_precursor(Forwarder<Luminance_Link>* forwarder_LL, XYZ coeff, XYZ _value) {
-        my_link = new Forwarder<Luminance_Link>(nullptr);
-        forward_link = forwarder_LL;
-        coefficient = coeff;
-        value = _value;
-    }
-    LL_precursor(Forwarder<Luminance_Link>* forwarder_LL, XYZ coeff) {
-        my_link = new Forwarder<Luminance_Link>(nullptr);
-        forward_link = forwarder_LL;
-        coefficient = coeff;
-    }
-    LL_precursor(Forwarder<Luminance_Link>* forwarder_LL) {
-        my_link = new Forwarder<Luminance_Link>(nullptr);
-        forward_link = forwarder_LL;
-    }
-    LL_precursor() {}
-    ~LL_precursor() {
-        if (value != XYZ(-1, -1, -1)) {
-            Luminance_Link* new_link = new Luminance_Link(value, coefficient, forward_link->ptr, my_link);
-            forward_link->ptr->backward_links.push_back(new_link);
-            my_link->ptr = new_link;
-        }
-;    }
-};
-
 struct PackagedRay {
     XYZ position;
     XYZ slope;
@@ -1287,7 +1257,6 @@ class Camera {
 public:
     XYZ position;
     Scene* scene;
-    Accelerator* accelerator;
 
     Lens* lens;
     XYZ focal_position;
@@ -1301,66 +1270,22 @@ public:
     int current_resolution_x;
     int current_resolution_y;
 
+    Camera(Scene* _scene, XYZ _position, Lens* _lens, decimal focal_distance) : scene(_scene),
+        lens(_lens), position(_position), focal_position(XYZ(0,0,-focal_distance)) {}
+
     Camera(Scene* _scene, XYZ _position, Lens* _lens, XYZ _focal_position) : scene(_scene),
         lens(_lens), position(_position), focal_position(_focal_position) {}
 
-    void prep(int resolution_x, int resolution_y, Accelerator* _accelerator) {
-        accelerator = _accelerator;
+    void prep(int resolution_x, int resolution_y, int samples) {
         current_resolution_x = resolution_x;
         current_resolution_y = resolution_y;
-        lens->calculate_grid(resolution_x, resolution_y);
-        lens->calculate_vectors(resolution_x, resolution_y, focal_position);
-        for (int y_index = 0; y_index < resolution_y; y_index++) {
-            vector<XYZ*> output_row;
-            for (int x_index = 0; x_index < resolution_x; x_index++) {
-                output_row.push_back(new XYZ(0, 0, 0));
-            }
-            image_output.push_back(output_row);
-        }
-        for (int y_index = 0; y_index < resolution_y; y_index++) {
-            vector<vector<XYZ*>> output_row;
-            for (int x_index = 0; x_index < resolution_x; x_index++) {
-                vector<XYZ*> pixel_rays;
-                output_row.push_back(pixel_rays);
-            }
-            ray_outputs.push_back(output_row);
-        }
+        lens->prep(resolution_x, resolution_y, samples);
     }
-    void process_outputs_to_colors() {
-        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
-            vector<XYZ> slope_row = lens->slope_grid.at(y_index);
-            vector<vector<XYZ*>> output_row;
-            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
-                vector<XYZ*> rays = ray_outputs[y_index][x_index];
-                XYZ total_luminence = XYZ(0, 0, 0);
-                for (int i = 0; i < rays.size(); i++) {
-                    total_luminence += *rays[i];
-                }
-                XYZ average_luminence = total_luminence / rays.size();
-                
-                image_output[y_index][x_index] = new XYZ(average_luminence.X, average_luminence.Y, average_luminence.Z);//I know you should be able to just use &
-                //but im a bit paranoid after C++ kept freeing local objects I was pointerizing using &
-            }
-        }
+
+    XYZ slope_at(int p_x, int p_y, int sample_index) {
+        return XYZ::slope(focal_position,lens->at(p_x, p_y, sample_index));
     }
-    void process_color_ptrs_to_colors(vector<vector<XYZ*>>& outputs) {
-        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
-            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
-                XYZ* output = outputs[y_index][x_index];
-                image_output[y_index][x_index] = new XYZ(output->X, output->Y, output->Z);//I know you should be able to just use &
-                //but im a bit paranoid after C++ kept freeing local objects I was pointerizing using &
-            }
-        }
-    }
-    void process_luminance_links_to_color(vector<vector<Luminance_Link*>>& links) {
-        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
-            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
-                XYZ output = links[y_index][x_index]->calculate_output();
-                image_output[y_index][x_index] = new XYZ(output.X,output.Y,output.Z);
-                links[y_index][x_index]->~Luminance_Link();
-            }
-        }
-    }
+    
     decimal luminance(XYZ v)
     {
         return XYZ::dot(v, XYZ(0.2126, 0.7152, 0.0722));
@@ -1443,23 +1368,17 @@ public:
         decimal e = 0.14;
         return (x * (a * x + b)) / (x * (c * x + d) + e);
     }
-    void post_process() {
-        for (int y_index = 0; y_index < current_resolution_y; y_index++) {
-            for (int x_index = 0; x_index < current_resolution_x; x_index++) {
-                XYZ* luminence = image_output[y_index][x_index];
-                XYZ scaled_return = (*luminence)*pre_scaled_gain;
-                decimal scalar_value = scaled_return.magnitude();
-                //scaled_return = scaled_return * Filmic_curve(scalar_value);
-                //scaled_return = scaled_return*log10(luminance(scaled_return) + 1) / luminance(scaled_return) * post_scaled_gain;//maybe more correct? dunno.
-                scaled_return = XYZ::log(scaled_return + 1) * post_scaled_gain;
-                //scaled_return = ACESFitted(scaled_return);
-                //scaled_return = FastACES(scaled_return);
-                //scaled_return = reinhard_extended_luminance(scaled_return, 200);
-                scaled_return = XYZ::clamp(scaled_return, 0, 1)*255;
-                image_output[y_index][x_index] = new XYZ(scaled_return.X, scaled_return.Y, scaled_return.Z);
-                delete luminence;
-            }
-        }
+    XYZ post_process(XYZ luminence) {
+        XYZ scaled_return = luminence * pre_scaled_gain;
+        decimal scalar_value = scaled_return.magnitude();
+        //scaled_return = scaled_return * Filmic_curve(scalar_value);
+        //scaled_return = scaled_return*log10(luminance(scaled_return) + 1) / luminance(scaled_return) * post_scaled_gain;//maybe more correct? dunno.
+        scaled_return = XYZ::log(scaled_return + 1) * post_scaled_gain;
+        //scaled_return = ACESFitted(scaled_return);
+        //scaled_return = FastACES(scaled_return);
+        //scaled_return = reinhard_extended_luminance(scaled_return, 200);
+        scaled_return = XYZ::clamp(scaled_return, 0, 1) * 255;
+        return scaled_return;
     }
 };
 
@@ -1498,7 +1417,6 @@ struct CastResults {
 };
 
 struct Casting_Diagnostics {
-    signed int blocks_created = 0;
     long reflections_cast = 0;
     long shadows_cast = 0;
     long diffuses_cast = 0;
@@ -1511,21 +1429,69 @@ struct Casting_Diagnostics {
 //#define RAY_BLOCK_SIZE 65536
 #define RAY_BLOCK_SIZE 16*4
 typedef DataBlock<PackagedRay,RAY_BLOCK_SIZE> Ray_Block;
-typedef DataBlock<XYZ, RAY_BLOCK_SIZE> Render_Block;
 
-struct render_pair {
-    int index = 0;
-    Ray_Block* ray_data;
-    Render_Block* render_outputs;
-    bool is_full() {
-        return index < RAY_BLOCK_SIZE;
+struct Render_Pair {
+    Ray_Block* ray_queue;
+    iXY::set* coords;
+    void enqueue_ray(PackagedRay& ray, iXY coord) {
+        ray_queue->enqueue(ray);
+        coords->insert(coord);
     }
-    XYZ* get_output() {
-        return &((*render_outputs).get_ref(index));
+    ~Render_Pair() {
+        delete ray_queue;
+        delete coords;
     }
-    void enqueue_ray(PackagedRay& ray) {
-        ray_data->enqueue(ray);
-        index++;
+};
+
+class Block_Manager {
+public:
+    vector<Render_Pair*> blocks;
+    Render_Pair* current_block = nullptr;
+    Render_Pair* enqueuement_block = nullptr;
+    int max_size = 0;
+    void enqueue_ray(PackagedRay& ray, iXY coord) {
+        ensure_space();
+        enqueuement_block->enqueue_ray(ray, coord);
+    }
+    void enqueuement_done() {
+        commit_enqueuement();
+        max_size = size();
+    }
+    Ray_Block* next() {
+        delete_current();
+        blocks.pop_back();
+        current_block = blocks.back();
+        return current_block->ray_queue;
+    }
+    iXY::set* changed_pixels() {
+        return current_block->coords;
+    }
+    int size() {
+        return blocks.size();
+    }
+private:
+    void delete_current() {
+        if (current_block == nullptr) {
+            return;
+        }
+        delete current_block;
+    }
+    void replace_enqueuement() {
+        enqueuement_block = new Render_Pair();
+        enqueuement_block->ray_queue = new Ray_Block();
+        enqueuement_block->coords = new iXY::set();
+    }
+    void commit_enqueuement() {
+        blocks.push_back(enqueuement_block);
+        replace_enqueuement();
+    }
+    void ensure_space() {
+        if (enqueuement_block == nullptr) {
+            replace_enqueuement();
+        }
+        if (enqueuement_block->ray_queue->isFull()) {
+            commit_enqueuement();
+        }
     }
 };
 
@@ -1534,91 +1500,24 @@ public:
     vector<PackagedSphere> sphere_data; //stores primitives in a more packed data format for better cache optimizations.
     vector<PackagedPlane> plane_data; //Ive made quite a few mistakes throughout this project but I think Im finally on track with this
     vector<PackagedTri> tri_data;
-    Ray_Block* enqueuement_block;
-    int enqueuement_index = 0;
-    vector<Ray_Block*> queue_stack = vector<Ray_Block*>();
-    vector<bool> object_check_state;
-    vector<decimal> prev_distances;
-
-    vector<int> tag_total = {0,0,0,0,0};
-    vector<int> tag_count = {0,0,0,0,0};
-
     vector<PointLikeLight> lights;
+
     RayEngine() {}
     void prep() {
-        enqueuement_block = new Ray_Block();
-    }
-    bool prep_queue() {
-        if (queue_stack.size() > 0) {
-            return true;
-        }
-        if (enqueuement_block->size > 0) {
-            move_enqueuement_to_queue_stack();
-            return true;
-        }
-        return false;
     }
     void load_scene_objects(Scene* scene) {
         for (auto s : scene->spheres) {
             sphere_data.push_back(PackagedSphere(*s));
-            object_check_state.push_back(true);
-            prev_distances.push_back(0.0);
         }
         for (auto p : scene->planes) {
             plane_data.push_back(PackagedPlane(*p));
-            object_check_state.push_back(true);
-            prev_distances.push_back(0.0);
         }
         for (auto t : scene->tris) {
             tri_data.push_back(PackagedTri(t->p1o,t->p2o,t->p3o,t->origin,t->material));
-            object_check_state.push_back(true);
-            prev_distances.push_back(0.0);
         }
         for (auto PLL : scene->pointlike_lights) {
             lights.push_back(*PLL);
         }
-    }
-    void move_enqueuement_to_queue_stack() {
-        tag_total[enqueuement_block->tag]++;
-        queue_stack.push_back(enqueuement_block);
-        enqueuement_block = new Ray_Block();
-        enqueuement_block->tag = 0;
-    }
-    void mark_enqueuement_expensive(int tier) {
-        if (tier>enqueuement_block->tag) {
-            enqueuement_block->tag = tier;
-        }
-
-    }
-    void clear_below_tier(int tier) {
-        for (int tier_index = 0; tier_index < tier; tier_index++) {
-            tag_total[tier_index] = 0;
-            tag_count[tier_index] = 0;
-        }
-    }
-    void enqueue_ray(PackagedRay& ray) {
-        if (enqueuement_block->isFull()) {
-            move_enqueuement_to_queue_stack();
-        }
-        enqueuement_block->enqueue(ray);
-    }
-    vector<vector<XYZ*>> enqueue_camera_slopes(Camera* camera, XYZ position, char bounces) {
-        int index = 0;
-        vector<vector<XYZ*>> out;
-        for (auto row : camera->lens->slope_grid) {
-            vector<XYZ*> out_row;
-            for (auto slope : row) {
-                XYZ* output_link = new XYZ();
-                int monte_bounce_count = 2;
-                auto ray = PackagedRay(position, slope, XYZ(1,1,1), output_link, bounces, 2, 128, 256, true);
-                enqueue_ray(ray);
-                mark_enqueuement_expensive(monte_bounce_count+1);
-                out_row.push_back(output_link);
-                index++;
-            }
-            out.push_back(out_row);
-        }
-        return out;
     }
     CastResults execute_ray_cast(XYZ& position,const XYZ& slope) {
         #define default_smallest_distance 9999999;
@@ -1703,7 +1602,6 @@ public:
                         //enqueue_ray(ray);
                         process_ray(stats, ray);
                         stats.diffuses_cast++;
-                        mark_enqueuement_expensive(ray_data.remaining_monte_carlo);
                     }
                 }
                 else {
@@ -1786,25 +1684,17 @@ public:
 
         }
     }
-    Casting_Diagnostics process_block() {
+    Casting_Diagnostics process_block(Ray_Block* block) {
 
         auto start_time = chrono::high_resolution_clock::now();
 
         Casting_Diagnostics stats;
-        stats.blocks_created = -(((signed int)queue_stack.size()) - 1);
-        Ray_Block* cast_block = queue_stack.back();
-        queue_stack.pop_back();
-        clear_below_tier(cast_block->tag);
-        tag_count[cast_block->tag]++;
-
         
-        for (int ray_index = 0; ray_index < cast_block->size; ray_index++) {
-            PackagedRay& ray_data = cast_block->get_ref(ray_index);
+        for (int ray_index = 0; ray_index < block->size; ray_index++) {
+            PackagedRay& ray_data = block->get_ref(ray_index);
             process_ray(stats,ray_data);
 
         }
-        delete cast_block;
-        stats.blocks_created += queue_stack.size();
         auto end_time = chrono::high_resolution_clock::now();
         stats.duration = end_time - start_time;
         return stats;
@@ -1816,78 +1706,138 @@ class SceneManager {
 public:
     Camera* camera;
     Scene* scene;
-    Accelerator* accelerator;
     sf::RenderWindow* window;
+    sf::Image canvas;
+    sf::Texture texture;
+    sf::Sprite sprite;
     RayEngine RE;
+    Block_Manager BM;
+    vector<vector<XYZ*>> raw_output;
 
     int current_resolution_x = 0;
     int current_resolution_y = 0;
+    int current_samples_per_pixel = 0;
+
+    double scalar_exponent = 0;
 
     chrono::steady_clock::time_point render_start;
     SceneManager(Camera* _camera, Scene* _scene):
-    camera(_camera), scene(_scene), accelerator(new Accelerator(_scene))
-    {
-    }
-    void render(int resolution_x, int resolution_y) {
+    camera(_camera), scene(_scene){}
+    void render(int resolution_x, int resolution_y, int samples_per_pixel = 1) {
         current_resolution_x = resolution_x;
         current_resolution_y = resolution_y;
+        current_samples_per_pixel = samples_per_pixel;
+
+        BM = Block_Manager();
 
         render_start = chrono::high_resolution_clock::now();
         prep();
-        auto LL_field = enqueue_rays();
+        create_window();
+        enqueue_rays();
         cout <<endl << "+RAYCASTING+" << endl;
         run_engine(true);
-        cout << endl << "+POST-PROCESSING+" << endl;
-        //emit_rays();
-        post_process_color_ptr(LL_field);
-        create_window();
-        draw();
+        hold_window();
 
     }
 private:
     void prep() {
-        accelerator->prep(scene->spheres, scene->planes, scene->pointlike_lights);
+        cout << "Prepping.........." << flush;
 
-        cout << "Prepping camera.........." << flush;
+        auto prep_start = chrono::high_resolution_clock::now();
 
-        auto camera_prep_start = chrono::high_resolution_clock::now();
-        camera->prep(current_resolution_x, current_resolution_y, accelerator);
+        for (int y = 0; y < current_resolution_y; y++) {
+            vector<XYZ*> row;
+            for (int x = 0; x < current_resolution_x; x++) {
+                row.push_back(new XYZ(0, 0, 0));
+            }
+            raw_output.push_back(row);
+        }
+
+        camera->prep(current_resolution_x, current_resolution_y, current_samples_per_pixel);
+        current_samples_per_pixel *= current_samples_per_pixel;
         RE.load_scene_objects(scene);
         RE.prep();
-        auto camera_prep_end = chrono::high_resolution_clock::now();
 
-        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(camera_prep_end - camera_prep_start).count() << "ms]" << endl;
+        canvas.create(current_resolution_x, current_resolution_y, sf::Color::Black);
+        sprite.setScale(make_scale(), -make_scale());
+        sprite.setPosition(0, make_scale()*current_resolution_y);
+        
+        auto prep_end = chrono::high_resolution_clock::now();
+
+        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
 
     }
-    vector<vector<XYZ*>> enqueue_rays() {
+    void enqueue_rays() {
         cout << "Queueing Rays............" << flush;
-
         auto queue_start = chrono::high_resolution_clock::now();
-        auto LL_array = RE.enqueue_camera_slopes(camera, camera->focal_position+camera->position, 4);
-        auto queue_end = chrono::high_resolution_clock::now();
 
+        XYZ emit_coord = camera->focal_position + camera->position;
+
+        XYZ start_position = emit_coord;
+        XYZ starting_coefficient = XYZ(1, 1, 1)/current_samples_per_pixel;
+        int max_bounces = 8;
+        int monte_bounce_count = 0;
+        int diffuse_emit_count = 4;
+        int lighting_emit_count = 16;
+
+        for (int y = 0; y < current_resolution_y; y++) {
+            for (int x = 0; x < current_resolution_x; x++) {
+                for (int i = 0; i < current_samples_per_pixel; i++) {
+                    XYZ* output_link = (raw_output[y][x]);
+                    XYZ slope = camera->slope_at(x, y, i);
+                    auto ray = PackagedRay(
+                        start_position,
+                        slope,
+                        starting_coefficient,
+                        output_link,
+                        max_bounces,
+                        monte_bounce_count,
+                        diffuse_emit_count,
+                        lighting_emit_count,
+                        true
+                    );
+                    BM.enqueue_ray(ray, iXY(x, y));
+                }
+            }
+        }
+        BM.enqueuement_done();
+        auto queue_end = chrono::high_resolution_clock::now();
         cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(queue_end-queue_start).count() << "ms]" << endl;
-        return LL_array;
     }
     void run_engine(bool verbose) {
         auto start_time = chrono::high_resolution_clock::now();
-        int blocks_ripped = 0;
-        long long rays = 0;
-        while (RE.prep_queue()) { //this returns true if theres still rays to be processed
-            fire_casting_event(rays,verbose);
-            blocks_ripped++;
+        int blocks_processed = 0;
+        long long rays_cast = 0;
+        auto frame_time = start_time;
+        while (BM.size()>1) { //this returns true if theres still rays to be processed
+            process_block(rays_cast,verbose);
+            blocks_processed++;
+            auto time = chrono::high_resolution_clock::now();
+            if (chrono::duration_cast<chrono::milliseconds>(time - frame_time).count() > 16) {
+                commit_canvas();
+                handle_events();
+                frame_time = time;
+            }
         }
         cout << endl;
 
         auto end_time = chrono::high_resolution_clock::now();
         double millis = chrono::duration_cast<chrono::milliseconds>(end_time - start_time).count();
-        long long approx_rays = blocks_ripped * RAY_BLOCK_SIZE;
-        cout << "Ray Casting Done [" << to_string(millis) << "ms][" << blocks_ripped << " Blocks Processed]" << endl;
-        cout << "Approximate speed: " << intToEng((rays / (millis / 1000.0))) << " rays/s";
+        long long approx_rays = blocks_processed * RAY_BLOCK_SIZE;
+        cout << "Ray Casting Done [" << to_string(millis) << "ms][" << blocks_processed << " Blocks Processed]" << endl;
+        cout << "Approximate speed: " << intToEng((rays_cast / (millis / 1000.0))) << " rays/s";
     }
-    void fire_casting_event(long long& rays_cast, bool verbose) {
+    void process_block(long long& rays_cast, bool verbose) {
+        Ray_Block* block = BM.next();
+        fire_casting_event(block, rays_cast, verbose);
+        iXY::set* changes = BM.changed_pixels();
+        for (iXY change : *changes) {
+            commit_pixel(change.X, change.Y);
+        }
+    }
+    void fire_casting_event(Ray_Block* block, long long& rays_cast, bool verbose) {
 
-        auto diagnostics = RE.process_block();
+        auto diagnostics = RE.process_block(block);
         rays_cast += diagnostics.rays_processed;
         if (verbose) {
             auto now = chrono::high_resolution_clock::now();
@@ -1899,7 +1849,6 @@ private:
 
             string debug_output = "[" + iToFixedLength(hours, 2, "0") + ":" + iToFixedLength(minutes, 2, "0") + ":" + iToFixedLength(seconds, 2, "0") + "]";
             debug_output += "[" + iToFixedLength(chrono::duration_cast<chrono::milliseconds>(diagnostics.duration).count(),6) + "ms::";
-            debug_output += iToFixedLength(diagnostics.blocks_created,0) + "NB::";
             debug_output += iToFixedLength(diagnostics.reflections_cast,9) + "R::";
             debug_output+= iToFixedLength(diagnostics.shadows_cast,9) + "S::";
             debug_output += iToFixedLength(diagnostics.diffuses_cast,9) + "D]";
@@ -1907,75 +1856,74 @@ private:
             for (int i = 0; i < period_count; i++) {
                 debug_output+=".";
             }
-            debug_output += "[" + iToFixedLength(RE.tag_count[0],1) + "/" + iToFixedLength(RE.tag_total[0],1) + "]";
-            debug_output += "[" + intToEng(RE.tag_count[1]) + "/" + intToEng(RE.tag_total[1]) + "]";
-            debug_output += "[" + intToEng(RE.tag_count[2]) + "/" + intToEng(RE.tag_total[2]) + "]";
-            debug_output += "[" + iToFixedLength(RE.tag_count[3],3) + "/" + iToFixedLength(RE.tag_total[3],3) + "]";
-            debug_output += "[" + iToFixedLength(RE.tag_count[4],2) + "/" + iToFixedLength(RE.tag_total[4],2) + "]";
-            debug_output += "[" + iToFixedLength(RE.queue_stack.size(), 5) + "]\r";
+            debug_output += "[" + iToFixedLength(BM.size(), 5) + "/" + iToFixedLength(BM.max_size,5) + "]";
+            debug_output += "[" + iToFixedLength(BM.size(), 5) + "]\r";
             cout << debug_output << flush;
         }
 
 
 
     }
-    void post_process_color_ptr(vector<vector<XYZ*>>& XYZ_array) {
-        cout << "Post-Processing..." << flush;
-        auto post_processing_start = chrono::high_resolution_clock::now();
-        camera->process_color_ptrs_to_colors(XYZ_array);
-        camera->post_process();
-        auto post_processing_end = chrono::high_resolution_clock::now();
-        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(post_processing_end - post_processing_start).count() << "ms]" << endl;
-    }
-    void post_process_LL(vector<vector<Luminance_Link*>>& LL_array) {
-        cout << "Post-Processing..." << flush;
-        auto post_processing_start = chrono::high_resolution_clock::now();
-        camera->process_luminance_links_to_color(LL_array);
-        camera->post_process();
-        auto post_processing_end = chrono::high_resolution_clock::now();
-        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(post_processing_end - post_processing_start).count() << "ms]" << endl;
-    }
-    void post_process() {
-        cout << "Post-Processing..." << flush;
-        auto post_processing_start = chrono::high_resolution_clock::now();
-        camera->process_outputs_to_colors();
-        auto post_processing_end = chrono::high_resolution_clock::now();
-        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(post_processing_end - post_processing_start).count() << "ms]" << endl;
-    }
     void create_window() {
         cout << "Opening Window...." << flush;
-        window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * PIXEL_SCALAR, current_resolution_y * PIXEL_SCALAR), "Render Window!");
+        window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * make_scale(), current_resolution_y * make_scale()), "Render Window!");
         cout << "Done" << endl;
     }
-    void draw() {
-        cout << "Drawing..........." << flush;
-        auto drawing_start = chrono::high_resolution_clock::now();
-
-        sf::RectangleShape rectangle(sf::Vector2f(PIXEL_SCALAR, PIXEL_SCALAR));
-        for (int row_index = 0; row_index < camera->image_output.size(); row_index++) {
-            vector<XYZ*> image_row = camera->image_output.at(row_index);
-            for (int column_index = 0; column_index < image_row.size(); column_index++) {
-                XYZ* pixel_data = image_row.at(column_index);
-                rectangle.setFillColor(sf::Color(pixel_data->X, pixel_data->Y, pixel_data->Z));
-                rectangle.setPosition(column_index * PIXEL_SCALAR, row_index * PIXEL_SCALAR);
-                window->draw(rectangle);
-            }
-        }
+    void commit_pixel(int x, int y) {
+        XYZ color = camera->post_process(*raw_output[y][x]);
+        auto sfcolor = sf::Color(color.X, color.Y, color.Z);
+        canvas.setPixel(x, y, sfcolor);
+    }
+    void draw_sprite() {
+        window->clear();
+        window->draw(sprite);
         window->display();
-        auto drawing_end = chrono::high_resolution_clock::now();
-        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(drawing_end - drawing_start).count() << "ms]" << endl;
-
+    }
+    void commit_canvas() {
+        texture.loadFromImage(canvas);
+        sprite.setTexture(texture, false);
+        draw_sprite();
+    }
+    void hold_window() {
+        auto frame_time = chrono::high_resolution_clock::now();
         while (window->isOpen())
         {
             sf::Event event;
             while (window->pollEvent(event))
             {
-                if (event.type == sf::Event::Closed)
-                    window->close();
+                handle_events(event);
             }
+            draw_sprite();
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
+    }
+    void handle_events() {
+        sf::Event event;
+        while (window->pollEvent(event)) {
+            handle_events(event);
+        }
+    }
+    double make_scale() {
+        return pow(2, scalar_exponent);
+    }
+    void handle_events(sf::Event event) {
+        if (event.type == sf::Event::Closed) window->close();
+        if (event.type == sf::Event::Resized)
+        {
+            // update the view to the new size of the window
+            sf::FloatRect visibleArea(0, 0, event.size.width, event.size.height);
+            window->setView(sf::View(visibleArea));
+        }
+        if (event.type == sf::Event::MouseWheelMoved)
+        {
+            // display number of ticks mouse wheel has moved
+            double amount = event.mouseWheel.delta;
+            scalar_exponent += amount/5;
+            cout << make_scale() << " " << scalar_exponent << endl;
+            double scale = make_scale();
+            sprite.setScale(scale,-scale);
 
-
+        }
     }
 };
 
@@ -2179,7 +2127,7 @@ int main()
 
     SceneManager* scene_manager = load_default_scene();
    
-    scene_manager->render(1920/8,1080/8);
+    scene_manager->render(1920/2,1080/2,5);
 
 }
 
