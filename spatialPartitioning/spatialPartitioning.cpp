@@ -142,24 +142,6 @@ decimal lerp(decimal a, decimal b, decimal factor) {
     return a + factor * (b - a);
 }
 
-std::vector<std::string> readLinesFromFile(const std::string& fileName) { //chatgpt lol
-    std::vector<std::string> lines;
-    std::ifstream file(fileName);
-
-    if (!file.is_open()) {
-        std::cerr << "Error opening file: " << fileName << std::endl;
-        return lines;
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        lines.push_back(line);
-    }
-
-    file.close();
-    return lines;
-}
-
 vector<string> eng_levels = vector<string>{
     "k",
     "M",
@@ -206,6 +188,24 @@ string intToEng(int inum, bool force_small = false) {
         num /= 1000;
         prefix = level;
     }
+}
+
+vector<string> split_string(string input, char splitter) {
+    vector<string> output;
+    string s;
+    int size = input.size();
+    for (int i = 0; i < size; i++) {
+        char c = input[i];
+        if (c == splitter) {
+            output.push_back(s);
+            s = "";
+        }
+        else {
+            s += c;
+        }
+    }
+    output.push_back(s);
+    return output;
 }
 
 struct iXY {
@@ -272,6 +272,7 @@ public:
     decimal Y;
     decimal Z;
     XYZ() : X(0), Y(0), Z(0) {}
+    XYZ(decimal s) : X(s), Y(s), Z(s) {}
     XYZ(decimal _X, decimal _Y, decimal _Z) : X(_X), Y(_Y), Z(_Z) {}
     XYZ(XY xy, decimal _Z) : X(xy.X), Y(xy.Y), Z(_Z) {}
     XYZ(XY xy) : XYZ(xy, 0) {}
@@ -492,6 +493,18 @@ public:
         Z += other.Z;
         return *this;
     }
+    XYZ operator *= (const XYZ & other) {
+        X *= other.X;
+        Y *= other.Y;
+        Z *= other.Z;
+        return *this;
+    }
+    XYZ operator *= (const decimal& scalar) {
+        X *= scalar;
+        Y *= scalar;
+        Z *= scalar;
+        return *this;
+    }
     XYZ operator-() {
         return XYZ(-X, -Y, -Z);
     }
@@ -531,6 +544,14 @@ struct Quat : public XYZ {
     }
     static decimal dot(const Quat& q1, const Quat& q2) {
         return q1.X * q2.X + q1.Y * q2.Y + q1.Z * q2.Z + q1.W * q2.W;
+    }
+    static Quat multiply(const Quat& q1, const Quat& q2) {
+        return Quat(
+            q1.W * q2.X + q1.X * q2.W + q1.Y * q2.Z - q1.Z * q2.Y,
+            q1.W * q2.Y - q1.X * q2.Z + q1.Y * q2.W + q1.Z * q2.X,
+            q1.W * q2.Z + q1.X * q2.Y - q1.Y * q2.X + q1.Z * q2.W,
+            q1.W * q2.W - q1.X * q2.X - q1.Y * q2.Y - q1.Z * q2.Z
+        );
     }
     static Quat normalize(const Quat& in) {
         decimal d = Quat::dot(in, in);
@@ -892,13 +913,11 @@ public:
 
 class Primitive {
 public:
-    Material material;
+    Material* material;
     //pair<XYZ, XYZ> bounds;
     XYZ origin;
     int obj_type = 0;
-    Primitive(Material _material) {
-        material = _material;
-    }
+    Primitive(Material* _material):material(_material) {}
     virtual pair<XYZ, XYZ> get_bounds() { return pair<XYZ, XYZ>(); }
 
     virtual bool check_backface(XYZ& position) { return false; }
@@ -907,7 +926,7 @@ public:
         cout << "[ERROR] Default distance function called! Something is misconfigured!" << endl;
         return 0;
     } //how to fix if this gets called: alcohol and crying
-    virtual Material material_properties_at(XYZ) {
+    virtual Material* material_properties_at(XYZ) {
         return material;
     }
 };
@@ -920,6 +939,16 @@ public:
     PointLikeLight(XYZ _origin, decimal _radius, Primitive* _host) : origin(_origin), radius(_radius), host(_host) {}
 };
 
+class SpotLight {
+    XYZ origin;
+    XYZ pointing;
+    Primitive* host;
+    SpotLight(XYZ _origin, XYZ _pointing, Primitive* _host) :origin(_origin), pointing(_pointing), host(_host) {}
+    static SpotLight fromNormal(XYZ origin, XYZ normal, Primitive* host) {
+        return SpotLight(origin, XYZ::flip(normal), host);
+    }
+};
+
 struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1;
     XYZ p2;
@@ -928,11 +957,17 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1p3;
     XYZ p1p2;
     Material* material;
-    PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material& _material) {
-        material = &_material;
+    PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material* _material) {
         p1 = p1o + origin;
         p2 = p2o + origin;
         p3 = p3o + origin;
+        PackagedTri(p1, p2, p3, _material);
+    }
+    PackagedTri(const XYZ _p1, const XYZ _p2, const XYZ _p3, Material* _material) {
+        material = _material;
+        p1 = _p1;
+        p2 = _p2;
+        p3 = _p3;
         p1p3 = p3 - p1;
         p1p2 = p2 - p1;
         normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
@@ -941,12 +976,11 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
 
 class Tri :public Primitive {
 public:
-    XYZ p1o;
-    XYZ p2o;
-    XYZ p3o;
-    XYZ origin;
-    Tri(XYZ _origin, XYZ _p1o, XYZ _p2o, XYZ _p3o, Material _material) : Primitive(_material),
-        origin(_origin), p1o(_p1o), p2o(_p2o), p3o(_p3o) {}
+    XYZ p1;
+    XYZ p2;
+    XYZ p3;
+    Tri(XYZ _p1, XYZ _p2, XYZ _p3, Material* _material) : Primitive(_material),
+        p1(_p1), p2(_p2), p3(_p3) {}
     //https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/moller-trumbore-ray-triangle-intersection.html
     static decimal intersection_check_MoTru(const PackagedTri& T, const XYZ& position, const XYZ& slope){
         XYZ pvec = XYZ::cross(slope,T.p1p3);
@@ -975,6 +1009,12 @@ public:
     static XYZ get_normal(XYZ normal, XYZ position) {
         return (XYZ::dot(normal, position) > 0) ? normal : -normal;
     }
+    PackagedTri pack() {
+        return PackagedTri(
+            p1, p2, p3, material
+        );
+    }
+    
 };
 
 
@@ -982,7 +1022,7 @@ public:
 class Sphere : public Primitive {
 public:
     decimal radius = 0;
-    Sphere(decimal _radius, XYZ _origin, Material _material): Primitive(_material){
+    Sphere(decimal _radius, XYZ _origin, Material* _material): Primitive(_material){
         radius = _radius;
         origin = _origin;
         //bounds = get_bounds();
@@ -1048,7 +1088,7 @@ struct PackagedSphere { //reduced memory footprint to improve cache perf
     PackagedSphere(Sphere& sphere) {
         radius = sphere.radius;
         origin = sphere.origin;
-        material = &sphere.material;
+        material = sphere.material;
     }
 };
 
@@ -1056,7 +1096,7 @@ class Plane : public Primitive {
 public:
     XYZ normal;
     XYZ origin_offset;
-    Plane( XYZ _normal, XYZ _origin, Material _material) : Primitive(_material) {
+    Plane( XYZ _normal, XYZ _origin, Material* _material) : Primitive(_material) {
         origin = _origin;
         normal = XYZ::normalize(_normal);
         origin_offset = XYZ::dot(origin, normal) * normal;
@@ -1094,21 +1134,138 @@ struct PackagedPlane {
     PackagedPlane(Plane& plane) {
         normal = plane.normal;
         origin_offset = plane.origin_offset;
-        material = &plane.material;
+        material = plane.material;
     }
 };
 
-class Mesh{
-    vector<Face> faces;
-    vector<XYZ> planes;
+class Transformation {
+private:
+    Quat* rot_transform = nullptr;
+    XYZ*  XYZ_transform = nullptr;
+public:
+    Transformation(XYZ transformation, Quat rotation) {
+        rot_transform = new Quat(rotation);
+        XYZ_transform = new XYZ(transformation);
+    }
+    Transformation(Quat rotation) {
+        rot_transform = new Quat(rotation);
+    }
+    Transformation(XYZ transformation) {
+        XYZ_transform = new XYZ(transformation);
+    }
+    void stack(XYZ& XYZ_transf, Quat& rotation) {
+        if (XYZ_transform != nullptr) {
+            XYZ_transf += *XYZ_transform;
+        }
+        if (rot_transform != nullptr) {
+            rotation = Quat::multiply(rotation, *rot_transform);
+        }
+    }
+    void apply(XYZ& position) {
+        if (rot_transform != nullptr) {
+            position = Quat::applyRotation(position, *rot_transform);
+        }
+        if (XYZ_transform != nullptr) {
+            position += *XYZ_transform;
+        }
+    }
+    static Transformation collpase(vector<Transformation>& transforms) {
+        XYZ position = XYZ(0,0,0);
+        Quat rotation = Quat(0,0,0,1);
+        for (Transformation& t : transforms) {
+            t.stack(position, rotation);
+        }
+        return Transformation(position,rotation);
+    }
+};
+
+class Mesh {
+public:
+    vector<Tri> tris;
+    int primitive_count;
     Mesh() {}
-    int import_file(string file_name) {
-        return 0;
+    void prep() {
+        for (Tri& tri : tris) {
+            tri.material->prep();
+        }
     }
-    vector<Primitive> get_primitives() {
-
+    void addTri(Tri& T) {
+        tris.push_back(T);
+        primitive_count++;
     }
 };
+
+class Object {
+public:
+    XYZ origin;
+    XYZ scale;
+    vector<Transformation> transformations;
+    
+    vector<Mesh*> meshes;
+    Object(XYZ _origin, XYZ _scale):
+        origin(_origin), scale(_scale){
+        
+    }
+    void addMesh(Mesh* M) {
+        meshes.push_back(M);
+    }
+    void prep() {
+        for (Mesh* m : meshes) {
+            m->prep();
+        }
+    }
+    void _registerRotation(Quat rot) {
+        transformations.push_back(Transformation(rot));
+    }
+    void _registerMove(XYZ move) {
+        transformations.push_back(Transformation(move));
+    }
+    void applyTransformXYZ(decimal x, decimal y, decimal z) {
+        _registerMove(XYZ(x, y, z));
+    }
+    void rotateX(decimal rotation) {
+        XYZ orig = XYZ(0, 1, 0);
+        XYZ pointing = XYZ(0, cos(rotation), sin(rotation));
+        Quat rot = Quat::makeRotation(orig, pointing);
+        _registerRotation(rot);
+    }
+    void rotateY(decimal rotation) {
+        XYZ orig = XYZ(0, 0, 1);
+        XYZ pointing = XYZ(sin(rotation), 0, cos(rotation));
+        Quat rot = Quat::makeRotation(orig, pointing);
+        _registerRotation(rot);
+    }
+    void rotateZ(decimal rotation) {
+        XYZ orig = XYZ(1, 0, 0);
+        XYZ pointing = XYZ(cos(rotation), sin(rotation), 0);
+        Quat rot = Quat::makeRotation(orig, pointing);
+        _registerRotation(rot);
+    }
+    Transformation final_transform() {
+        return Transformation::collpase(transformations);
+    }
+};
+
+namespace Packers { //I wanted to put these methods in the primitives objects, but due to me not using header files atm, its not feasible
+    PackagedTri transformedPack(Tri& t, Transformation T, XYZ origin, XYZ scale) {
+        XYZ np1 = t.p1 - origin;
+        XYZ np2 = t.p2 - origin;
+        XYZ np3 = t.p3 - origin;
+        np1 *= scale;
+        np2 *= scale;
+        np3 *= scale;
+        T.apply(np1);
+        T.apply(np2);
+        T.apply(np3);
+        np1 += origin;
+        np2 += origin;
+        np3 += origin;
+        return PackagedTri(
+            np1, np2, np3, t.material
+        );
+    }
+}
+
 
 class Lens {
 public:
@@ -1184,9 +1341,11 @@ public:
     //C++ just wasnt made to be flexible :(
 
     int object_count = 0;
+    int primitive_count = 0;
     vector<Sphere*> spheres;
     vector<Plane*> planes;
     vector<Tri*> tris;
+    vector<Object*> objects;
 
     vector<PointLikeLight*> pointlike_lights;
 
@@ -1196,28 +1355,62 @@ public:
     
     void register_sphere(Sphere* sphere) {
         object_count++;
-        sphere->material.prep();
+        primitive_count++;
+        sphere->material->prep();
         spheres.push_back(sphere);
-        if (sphere->material.emission > 0) {
+        if (sphere->material->emission > 0) {
             pointlike_lights.push_back(new PointLikeLight(sphere->origin, sphere->radius,(Primitive*)sphere));
         }
     }
 
     void register_plane(Plane* plane) {
         object_count++;
-        plane->material.prep();
+        primitive_count++;
+        plane->material->prep();
         planes.push_back(plane);
     }
 
     void register_tri(Tri* tri) {
         object_count++;
-        tri->material.prep();
+        primitive_count++;
+        tri->material->prep();
         tris.push_back(tri);
+    }
+
+    void register_object(Object* obj) {
+        object_count++;
+        for (Mesh* M: obj->meshes) {
+            M->prep();
+            primitive_count+=M->primitive_count;
+        }
+        objects.push_back(obj);
     }
 
     
 private:
     
+};
+
+class BVH {
+    Scene* scene;
+    XYZ max;
+    XYZ min;
+    BVH(Scene* _scene) : scene(_scene) {}
+    bool intersection(const XYZ origin&, const XYZ& slope) {
+        double tx1 = (b.min.x - r.x0.x) * r.n_inv.x;
+        double tx2 = (b.max.x - r.x0.x) * r.n_inv.x;
+
+        double tmin = min(tx1, tx2);
+        double tmax = max(tx1, tx2);
+
+        double ty1 = (b.min.y - r.x0.y) * r.n_inv.y;
+        double ty2 = (b.max.y - r.x0.y) * r.n_inv.y;
+
+        tmin = max(tmin, min(ty1, ty2));
+        tmax = min(tmax, max(ty1, ty2));
+
+        return tmax >= tmin;
+    }
 };
 
 struct PackagedRay {
@@ -1261,8 +1454,7 @@ public:
     Lens* lens;
     XYZ focal_position;
 
-    decimal pre_scaled_gain = 1;
-    decimal post_scaled_gain = 1;
+    
 
     vector<vector<vector<XYZ*>>> ray_outputs;
     vector<vector<XYZ*>> image_output;
@@ -1285,102 +1477,21 @@ public:
     XYZ slope_at(int p_x, int p_y, int sample_index) {
         return XYZ::slope(focal_position,lens->at(p_x, p_y, sample_index));
     }
-    
-    decimal luminance(XYZ v)
-    {
-        return XYZ::dot(v, XYZ(0.2126, 0.7152, 0.0722));
-    }
-
-    XYZ change_luminance(XYZ c_in, decimal l_out)
-    {
-        decimal l_in = luminance(c_in);
-        return c_in * (l_out / l_in);
-    }
-    /*
-    decimal realistic_response(decimal f, decimal iso) // https://graphics-programming.org/resources/tonemapping/index.html
-    {
-        f = clamp(f, 0.0f, iso); // Clamp to [0, iso]
-        f /= iso; // Convert to [0, 1]
-
-        // Returns 1.0 if the index is out-of-bounds
-        auto get_or_one = [](const auto& arr, size_t index)
-        {
-            return index < arr.size() ? arr[index] : 1.0;
-        };
-
-        // std::upper_bound uses a binary search to find the position of f in camera_irradiance
-        auto upper = 100;//std::upper_bound(camera_irradiance.begin(), camera_irradiance.end(), f);
-        size_t idx = std::distance(camera_irradiance.begin(), upper);
-
-        double low_irradiance = camera_irradiance[idx];
-        double high_irradiance = get_or_one(camera_irradiance, idx + 1);
-        double lerp_param = (f - low_irradiance) / (high_irradiance - low_irradiance);
-
-        double low_val = 1;//camera_intensity[idx];
-        double high_val = get_or_one(camera_intensity, idx + 1);
-
-        // LERPing isn't really necessary for RGB8 (as the curve is sampled with 1024 points)
-        return clamp(lerp((float)low_val, (float)high_val, (float)lerp_param), 0.0f, 1.0f);
-    }
-    */
-    decimal Filmic_curve(decimal t) {
-        return 0.371 * (sqrt(t) + 0.28257 * log(t) + 1.69542);
-    }
-    XYZ reinhard_extended_luminance(XYZ v, decimal max_white_l)
-    {
-        decimal l_old = luminance(v);
-        decimal numerator = l_old * (1.0 + (l_old / (max_white_l * max_white_l)));
-        decimal l_new = numerator / (1.0 + l_old);
-        return change_luminance(v, l_new);
-    }
-    const Matrix3x3 ACESInputMat = Matrix3x3( //https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
-            0.59719, 0.35458, 0.04823,
-            0.07600, 0.90834, 0.01566,
-            0.02840, 0.13383, 0.83777
-    );
-    const Matrix3x3 ACESOutputMat = Matrix3x3(
-         1.60475, -0.53108, -0.07367,
-        -0.10208,  1.10813, -0.00605,
-        -0.00327, -0.07276,  1.07602
-    );
-    XYZ RRTAndODTFit(XYZ v)
-    {
-        XYZ a = v * (v + 0.0245786f) - 0.000090537f;
-        XYZ b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
-        return a / b;
-    }
-    XYZ ACESFitted(XYZ color)
-    {
-        color = Matrix3x3::multiply_horizontally(ACESInputMat,color);
-
-        // Apply RRT and ODT
-        color = RRTAndODTFit(color);
-
-        color = Matrix3x3::multiply_horizontally(ACESOutputMat, color);
-
-        return color;
-    }
-    XYZ FastACES(XYZ x) {
-        decimal a = 2.51;
-        decimal b = 0.03;
-        decimal c = 2.43;
-        decimal d = 0.59;
-        decimal e = 0.14;
-        return (x * (a * x + b)) / (x * (c * x + d) + e);
-    }
-    XYZ post_process(XYZ luminence) {
-        XYZ scaled_return = luminence * pre_scaled_gain;
-        decimal scalar_value = scaled_return.magnitude();
-        //scaled_return = scaled_return * Filmic_curve(scalar_value);
-        //scaled_return = scaled_return*log10(luminance(scaled_return) + 1) / luminance(scaled_return) * post_scaled_gain;//maybe more correct? dunno.
-        scaled_return = XYZ::log(scaled_return + 1) * post_scaled_gain;
-        //scaled_return = ACESFitted(scaled_return);
-        //scaled_return = FastACES(scaled_return);
-        //scaled_return = reinhard_extended_luminance(scaled_return, 200);
-        scaled_return = XYZ::clamp(scaled_return, 0, 1) * 255;
-        return scaled_return;
-    }
 };
+
+const Matrix3x3 ACESOutputMat = Matrix3x3(
+    1.60475, -0.53108, -0.07367,
+    -0.10208, 1.10813, -0.00605,
+    -0.00327, -0.07276, 1.07602
+);
+
+const Matrix3x3 ACESInputMat = Matrix3x3( //https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
+    0.59719, 0.35458, 0.04823,
+    0.07600, 0.90834, 0.01566,
+    0.02840, 0.13383, 0.83777
+);
+
+
 
 #define BLOCK_BOUNDS_CHECKING false
 template <typename T, int max_size> struct DataBlock {
@@ -1513,7 +1624,14 @@ public:
             plane_data.push_back(PackagedPlane(*p));
         }
         for (auto t : scene->tris) {
-            tri_data.push_back(PackagedTri(t->p1o,t->p2o,t->p3o,t->origin,t->material));
+            tri_data.push_back(t->pack());
+        }
+        for (auto O : scene->objects) {
+            Transformation final_transform = O->final_transform();
+            for (Mesh* M : O->meshes) {
+                for(Tri& T: M->tris)
+                tri_data.push_back(Packers::transformedPack(T,final_transform,O->origin,O->scale));
+            }
         }
         for (auto PLL : scene->pointlike_lights) {
             lights.push_back(*PLL);
@@ -1523,7 +1641,7 @@ public:
         #define default_smallest_distance 9999999;
         decimal smallest_distance = default_smallest_distance;
         CastResults returner = CastResults(XYZ(-1,-1,-1),nullptr);
-        for (PackagedSphere& s : sphere_data) {
+        for (const PackagedSphere& s : sphere_data) {
             decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
             if (distance >= 0) {
                 if (distance < smallest_distance) {
@@ -1533,7 +1651,7 @@ public:
                 }
             }
         }
-        for (PackagedPlane& p : plane_data) {
+        for (const PackagedPlane& p : plane_data) {
             decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
             if (distance >= 0) {
                 if (distance < smallest_distance) {
@@ -1543,7 +1661,7 @@ public:
                 }
             }
         }
-        for (PackagedTri& t : tri_data) {
+        for (const PackagedTri& t : tri_data) {
             decimal distance = Tri::intersection_check(t, position, slope);
             if (distance >= 0) {
                 if (distance < smallest_distance) {
@@ -1668,7 +1786,7 @@ public:
                         //enqueue_ray(ray);
                         process_ray(stats, ray);
                         */
-                        XYZ start_position = ray_data.position + NEAR_THRESHOLD * results.normal * 4;
+                        XYZ start_position = ray_data.position + NEAR_THRESHOLD * results.normal * 1.1;
                         CastResults res = execute_ray_cast(start_position, cast_slope);
                         if (res.material != nullptr) {
                             *ray_data.output += return_coefficient * res.material->calculate_emissions();
@@ -1701,44 +1819,218 @@ public:
     }
 };
 
+class GUIHandler {
+public:
+    int current_resolution_x = 0;
+    int current_resolution_y = 0;
+
+    sf::RenderWindow* window;
+    sf::Image canvas;
+    sf::Texture texture;
+    sf::Sprite sprite;
+
+    double scalar_exponent = 0;
+
+    GUIHandler() {}
+
+    GUIHandler(int resX, int resY) {
+        current_resolution_x = resX;
+        current_resolution_y = resY;
+        canvas.create(current_resolution_x, current_resolution_y, sf::Color::Black);
+        sprite.setScale(make_scale(), -make_scale());
+        sprite.setPosition(0, make_scale() * current_resolution_y);
+    }
+
+    void hold_window() {
+        auto frame_time = chrono::high_resolution_clock::now();
+        while (window->isOpen())
+        {
+            sf::Event event;
+            while (window->pollEvent(event))
+            {
+                handle_events(event);
+            }
+            draw_sprite();
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+    }
+    void create_window() {
+        cout << "Opening Window...." << flush;
+        window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * make_scale(), current_resolution_y * make_scale()), "Render Window!");
+        cout << "Done" << endl;
+    }
+    void commit_pixel(XYZ color, int x, int y) {
+        auto sfcolor = sf::Color(color.X, color.Y, color.Z);
+        canvas.setPixel(x, y, sfcolor);
+    }
+    void draw_sprite() {
+        window->clear();
+        window->draw(sprite);
+        window->display();
+    }
+    void commit_canvas() {
+        texture.loadFromImage(canvas);
+        sprite.setTexture(texture, false);
+        draw_sprite();
+    }
+
+    void handle_events() {
+        sf::Event event;
+        while (window->pollEvent(event)) {
+            handle_events(event);
+        }
+    }
+    double make_scale() {
+        return pow(2, scalar_exponent);
+    }
+    void handle_events(sf::Event event) {
+        if (event.type == sf::Event::Closed) window->close();
+        if (event.type == sf::Event::Resized)
+        {
+            // update the view to the new size of the window
+            sf::FloatRect visibleArea(0, 0, event.size.width, event.size.height);
+            window->setView(sf::View(visibleArea));
+        }
+        if (event.type == sf::Event::MouseWheelMoved)
+        {
+            // display number of ticks mouse wheel has moved
+            double amount = event.mouseWheel.delta;
+            scalar_exponent += amount / 5;
+            double scale = make_scale();
+            sprite.setScale(scale, -scale);
+
+        }
+    }
+};
+
+namespace ImageHandler {
+    XYZ post_process_pixel(XYZ luminence,int pre_scaled_gain, int post_scaled_gain) {
+        XYZ scaled_return = luminence * pre_scaled_gain;
+        decimal scalar_value = scaled_return.magnitude();
+        //scaled_return = scaled_return * Filmic_curve(scalar_value);
+        //scaled_return = scaled_return*log10(luminance(scaled_return) + 1) / luminance(scaled_return) * post_scaled_gain;//maybe more correct? dunno.
+        scaled_return = XYZ::log(scaled_return + 1) * post_scaled_gain;
+        //scaled_return = ACESFitted(scaled_return);
+        //scaled_return = FastACES(scaled_return);
+        //scaled_return = reinhard_extended_luminance(scaled_return, 200);
+        scaled_return = XYZ::clamp(scaled_return, 0, 1) * 255;
+        return scaled_return;
+    }
+    static decimal luminance(XYZ v)
+    {
+        return XYZ::dot(v, XYZ(0.2126, 0.7152, 0.0722));
+    }
+
+    static XYZ change_luminance(XYZ c_in, decimal l_out)
+    {
+        decimal l_in = luminance(c_in);
+        return c_in * (l_out / l_in);
+    }
+
+    //decimal realistic_response(decimal f, decimal iso) // https://graphics-programming.org/resources/tonemapping/index.html
+
+    static decimal Filmic_curve(decimal t) {
+        return 0.371 * (sqrt(t) + 0.28257 * log(t) + 1.69542);
+    }
+    static XYZ reinhard_extended_luminance(XYZ v, decimal max_white_l)
+    {
+        decimal l_old = luminance(v);
+        decimal numerator = l_old * (1.0 + (l_old / (max_white_l * max_white_l)));
+        decimal l_new = numerator / (1.0 + l_old);
+        return change_luminance(v, l_new);
+    }
+
+
+    static XYZ RRTAndODTFit(XYZ v)
+    {
+        XYZ a = v * (v + 0.0245786f) - 0.000090537f;
+        XYZ b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
+        return a / b;
+    }
+    static XYZ ACESFitted(XYZ color)
+    {
+        color = Matrix3x3::multiply_horizontally(ACESInputMat, color);
+
+        // Apply RRT and ODT
+        color = RRTAndODTFit(color);
+
+        color = Matrix3x3::multiply_horizontally(ACESOutputMat, color);
+
+        return color;
+    }
+    static XYZ FastACES(XYZ x) {
+        decimal a = 2.51;
+        decimal b = 0.03;
+        decimal c = 2.43;
+        decimal d = 0.59;
+        decimal e = 0.14;
+        return (x * (a * x + b)) / (x * (c * x + d) + e);
+    }
+    static void postProcessRaw(vector<vector<XYZ*>>* data) {
+        for (vector<XYZ*>& data_row : *data) {
+            for (XYZ*& pixel_ptr : data_row) {
+                *pixel_ptr = ImageHandler::post_process_pixel(*pixel_ptr,1,1);
+            }
+        }
+    }
+    static GUIHandler* openImageVector(vector<vector<XYZ*>>* data) {
+        int resX = data->at(0).size();
+        int resY = data->size();
+        cout << resX << " " << resY << endl;
+        GUIHandler* GUI = new GUIHandler(resX,resY);
+        for (int y = 0; y < resY;y++) {
+            for (int x = 0; x < resX; x++) {
+                GUI->commit_pixel(*(data->at(y)[x]), x, y);
+            }
+        }
+        GUI->create_window();
+        GUI->commit_canvas();
+        return GUI;
+    }
+};
+
+
+
 
 class SceneManager {
 public:
     Camera* camera;
     Scene* scene;
-    sf::RenderWindow* window;
-    sf::Image canvas;
-    sf::Texture texture;
-    sf::Sprite sprite;
     RayEngine RE;
     Block_Manager BM;
-    vector<vector<XYZ*>> raw_output;
+    GUIHandler GUI;
+    vector<vector<XYZ*>> raw_output; 
 
     int current_resolution_x = 0;
     int current_resolution_y = 0;
     int current_samples_per_pixel = 0;
 
-    double scalar_exponent = 0;
 
     chrono::steady_clock::time_point render_start;
+
     SceneManager(Camera* _camera, Scene* _scene):
     camera(_camera), scene(_scene){}
+
     void render(int resolution_x, int resolution_y, int samples_per_pixel = 1) {
         current_resolution_x = resolution_x;
         current_resolution_y = resolution_y;
         current_samples_per_pixel = samples_per_pixel;
 
         BM = Block_Manager();
+        GUI = GUIHandler(current_resolution_x, current_resolution_y);
 
         render_start = chrono::high_resolution_clock::now();
         prep();
-        create_window();
         enqueue_rays();
+        GUI.create_window();
         cout <<endl << "+RAYCASTING+" << endl;
         run_engine(true);
-        hold_window();
 
     }
+    void hold_window() {
+        GUI.hold_window();
+    }
+    
 private:
     void prep() {
         cout << "Prepping.........." << flush;
@@ -1758,9 +2050,7 @@ private:
         RE.load_scene_objects(scene);
         RE.prep();
 
-        canvas.create(current_resolution_x, current_resolution_y, sf::Color::Black);
-        sprite.setScale(make_scale(), -make_scale());
-        sprite.setPosition(0, make_scale()*current_resolution_y);
+        
         
         auto prep_end = chrono::high_resolution_clock::now();
 
@@ -1777,26 +2067,38 @@ private:
         XYZ starting_coefficient = XYZ(1, 1, 1)/current_samples_per_pixel;
         int max_bounces = 8;
         int monte_bounce_count = 0;
-        int diffuse_emit_count = 4;
-        int lighting_emit_count = 16;
+        int diffuse_emit_count = 32;
+        int lighting_emit_count = 1;
 
-        for (int y = 0; y < current_resolution_y; y++) {
-            for (int x = 0; x < current_resolution_x; x++) {
-                for (int i = 0; i < current_samples_per_pixel; i++) {
-                    XYZ* output_link = (raw_output[y][x]);
-                    XYZ slope = camera->slope_at(x, y, i);
-                    auto ray = PackagedRay(
-                        start_position,
-                        slope,
-                        starting_coefficient,
-                        output_link,
-                        max_bounces,
-                        monte_bounce_count,
-                        diffuse_emit_count,
-                        lighting_emit_count,
-                        true
-                    );
-                    BM.enqueue_ray(ray, iXY(x, y));
+        const int block_size = 16;
+
+        int y_increments = ceil(current_resolution_y / block_size);
+        int x_increments = ceil(current_resolution_x / block_size);
+        for (int i_y = 0; i_y < y_increments; i_y++) {
+            for (int i_x = 0; i_x < x_increments; i_x++) {
+                int offset_y = i_y * block_size;
+                int offset_x = i_x * block_size;
+                int final_y = offset_y + block_size;
+                int final_x = offset_x + block_size;
+                for (int y = offset_y; y < final_y;y++) {
+                    for (int x = offset_x; x < final_x; x++) {
+                        for (int i = 0; i < current_samples_per_pixel; i++) {
+                            XYZ* output_link = (raw_output[y][x]);
+                            XYZ slope = camera->slope_at(x, y, i);
+                            auto ray = PackagedRay(
+                                start_position,
+                                slope,
+                                starting_coefficient,
+                                output_link,
+                                max_bounces,
+                                monte_bounce_count,
+                                diffuse_emit_count,
+                                lighting_emit_count,
+                                true
+                            );
+                            BM.enqueue_ray(ray, iXY(x, y));
+                        }
+                    }
                 }
             }
         }
@@ -1814,11 +2116,12 @@ private:
             blocks_processed++;
             auto time = chrono::high_resolution_clock::now();
             if (chrono::duration_cast<chrono::milliseconds>(time - frame_time).count() > 16) {
-                commit_canvas();
-                handle_events();
+                GUI.commit_canvas();
+                GUI.handle_events();
                 frame_time = time;
             }
         }
+        refresh_canvas();
         cout << endl;
 
         auto end_time = chrono::high_resolution_clock::now();
@@ -1827,12 +2130,22 @@ private:
         cout << "Ray Casting Done [" << to_string(millis) << "ms][" << blocks_processed << " Blocks Processed]" << endl;
         cout << "Approximate speed: " << intToEng((rays_cast / (millis / 1000.0))) << " rays/s";
     }
+    void refresh_canvas() {
+        for (int y = 0; y < current_resolution_y; y++) {
+            for (int x = 0; x < current_resolution_x; x++) {
+                XYZ color = ImageHandler::post_process_pixel(*raw_output[y][x], 1, 1);
+                GUI.commit_pixel(color, x, y);
+            }
+        }
+        GUI.commit_canvas();
+    }
     void process_block(long long& rays_cast, bool verbose) {
         Ray_Block* block = BM.next();
         fire_casting_event(block, rays_cast, verbose);
         iXY::set* changes = BM.changed_pixels();
         for (iXY change : *changes) {
-            commit_pixel(change.X, change.Y);
+            XYZ color = ImageHandler::post_process_pixel(*raw_output[change.Y][change.X],1,1);
+            GUI.commit_pixel(color,change.X, change.Y);
         }
     }
     void fire_casting_event(Ray_Block* block, long long& rays_cast, bool verbose) {
@@ -1864,69 +2177,96 @@ private:
 
 
     }
-    void create_window() {
-        cout << "Opening Window...." << flush;
-        window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * make_scale(), current_resolution_y * make_scale()), "Render Window!");
-        cout << "Done" << endl;
-    }
-    void commit_pixel(int x, int y) {
-        XYZ color = camera->post_process(*raw_output[y][x]);
-        auto sfcolor = sf::Color(color.X, color.Y, color.Z);
-        canvas.setPixel(x, y, sfcolor);
-    }
-    void draw_sprite() {
-        window->clear();
-        window->draw(sprite);
-        window->display();
-    }
-    void commit_canvas() {
-        texture.loadFromImage(canvas);
-        sprite.setTexture(texture, false);
-        draw_sprite();
-    }
-    void hold_window() {
-        auto frame_time = chrono::high_resolution_clock::now();
-        while (window->isOpen())
-        {
-            sf::Event event;
-            while (window->pollEvent(event))
-            {
-                handle_events(event);
-            }
-            draw_sprite();
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        }
-    }
-    void handle_events() {
-        sf::Event event;
-        while (window->pollEvent(event)) {
-            handle_events(event);
-        }
-    }
-    double make_scale() {
-        return pow(2, scalar_exponent);
-    }
-    void handle_events(sf::Event event) {
-        if (event.type == sf::Event::Closed) window->close();
-        if (event.type == sf::Event::Resized)
-        {
-            // update the view to the new size of the window
-            sf::FloatRect visibleArea(0, 0, event.size.width, event.size.height);
-            window->setView(sf::View(visibleArea));
-        }
-        if (event.type == sf::Event::MouseWheelMoved)
-        {
-            // display number of ticks mouse wheel has moved
-            double amount = event.mouseWheel.delta;
-            scalar_exponent += amount/5;
-            cout << make_scale() << " " << scalar_exponent << endl;
-            double scale = make_scale();
-            sprite.setScale(scale,-scale);
-
-        }
-    }
+    
 };
 
+class FileManager {
+public:
+    FileManager() {}
+    static void writeRawFile(vector<vector<XYZ*>>* data, string fName) {
+        ofstream file(fName, ios::out | ios::binary | ios::trunc);
+        FileManager::writeRaw(data, file);
+        file.close();
+    }
+    static void writeRaw(vector<vector<XYZ*>>* data, ofstream& file) {
+        unsigned int resX = data->at(0).size();
+        unsigned int resY = data->size();
+        cout << resX << " " << resY << endl;
+        file.write((char*)&resX, sizeof(unsigned int));
+        file.write((char*)&resY, sizeof(unsigned int));
+        for (vector<XYZ*>& data_row : *data) {
+            for (XYZ* pixel_ptr : data_row) {
+                file.write((char*)pixel_ptr, sizeof(XYZ));
+            }
+        }
+    }
+    static GUIHandler* openRawFile(string fName) {
+        ifstream file(fName, ios::out | ios::binary);
+        return openRaw(file);
+    }
+    static GUIHandler* openRaw(ifstream& file) {
+        vector<vector<XYZ*>>* data = FileManager::readRaw(file);
+        file.close();
+        ImageHandler::postProcessRaw(data);
+        GUIHandler* GUI = ImageHandler::openImageVector(data);
+        return GUI;
+    }
+    static vector<vector<XYZ*>>* readRaw(ifstream& file) {
+        vector<vector<XYZ*>>* data = new vector<vector<XYZ*>>();
+        int resolutionX = 0;
+        int resolutionY = 0;
+        file.read((char*)&resolutionX, sizeof(int));
+        file.read((char*)&resolutionY, sizeof(int));
+        cout << resolutionX << " " << resolutionY << endl;
+        for (int y = 0; y < resolutionY; y++) {
+            vector<XYZ*> output_row;
+            for (int x = 0; x < resolutionX; x++) {
+                output_row.push_back(new XYZ(0, 0, 0));
+                file.read((char*)output_row[x], sizeof(XYZ));
+            }
+            data->push_back(output_row);
+        }
+        return data;
+    }
+    static Mesh* loadMeshFile(string fName, Material* mat) {
+        ifstream file(fName, ios::in);
+        return loadMesh(file, mat);
+    }
+    static Mesh* loadMesh(ifstream& file, Material* mat) {
+        Mesh* mesh = new Mesh();
+        vector<XYZ> verts;
+        for (std::string line; getline(file, line);){
+            string line_type = line.substr(0, line.find(" "));
+            vector<string> words = split_string(line, ' ');
+            if (line_type == "#") {
+                continue;
+            }
+            if (line_type == "mtllib") {
+                continue;
+            }
+            if (line_type == "o") {
+                continue;
+            }
+            if (line_type == "v") {
+                verts.push_back(XYZ(
+                        stod(words[1]),
+                        stod(words[2]),
+                        stod(words[3])
+                    ));
+                cout << verts.back() << endl;
+            }
+            if (line_type == "f") {
+                int i0 = stoi(words[1])-1;
+                int i1 = stoi(words[2])-1;
+                int i2 = stoi(words[3])-1;
+                Tri f = Tri(verts[i0], verts[i1], verts[i2], mat);
+                mesh->addTri(f);
+            }
+        }
+        return mesh;
+    }
+
+};
 
 /*
 Scene* load_cornell_box() {
@@ -2003,58 +2343,69 @@ SceneManager* load_default_scene() {
         decimal g = fRand(0, 1);
         decimal b = fRand(0, 1);
         XYZ origin = XYZ(x, y, z);
-        Material mat = Material(XYZ(r, g, b));
-        mat.roughness = 1;
+        Material* mat = new Material(XYZ(r, g, b));
+        mat->roughness = 1;
         Sphere* sphere =new Sphere(radius, origin, mat);
         spheres.push_back(sphere);
 
     }
 
-    Material sphere_mat;
-    sphere_mat.color = XYZ(0.2, 0.2, 1);//XYZ(0.24725, 0.1995, 0.0745);
-    sphere_mat.specular = 0;
-    sphere_mat.metallic = 0;
-    sphere_mat.roughness = 1;
+    Material* sphere_mat = new Material();
+    sphere_mat->color = XYZ(0.2, 0.2, 1);//XYZ(0.24725, 0.1995, 0.0745);
+    sphere_mat->specular = 0;
+    sphere_mat->metallic = 0;
+    sphere_mat->roughness = 1;
     Sphere* my_sphere =new Sphere(1, XYZ(0, 0, 0), sphere_mat);
 
-    Material sphere_2_mat;
-    sphere_2_mat.color = XYZ(1, 0.5, 0.5);//XYZ(0.24725, 0.1995, 0.0745);
-    sphere_2_mat.specular = 0;
-    sphere_2_mat.metallic = 0;
-    sphere_2_mat.roughness = 1;
+    Material* sphere_2_mat = new Material();
+    sphere_2_mat->color = XYZ(1, 0.5, 0.5);//XYZ(0.24725, 0.1995, 0.0745);
+    sphere_2_mat->specular = 0;
+    sphere_2_mat->metallic = 0;
+    sphere_2_mat->roughness = 1;
     Sphere* my_sphere_2 = new Sphere(0.4, XYZ(-0.9, -0.6, -0.7), sphere_2_mat);
     //Sphere* my_sphere_2 = new Sphere(0.4, XYZ(0, -0.6, 0.5), sphere_2_mat);
 
-    Material tri_mat;
-    tri_mat.color = XYZ(1, 0.5, 1);//XYZ(0.24725, 0.1995, 0.0745);
-    tri_mat.specular = 0.8;
-    tri_mat.metallic = 0;
-    tri_mat.roughness = 0.05;
-    Tri* my_tri = new Tri(XYZ(2, 0, 0), XYZ(3, -0.7, -3), XYZ(0, 3, 0), XYZ(-3, -0.7, 3), tri_mat);
+    Material* tri_mat = new Material();
+    tri_mat->color = XYZ(1, 0.5, 1);//XYZ(0.24725, 0.1995, 0.0745);
+    tri_mat->specular = 0.8;
+    tri_mat->metallic = 0;
+    tri_mat->roughness = 0.05;
+    Tri* my_tri = new Tri(XYZ(3, -0.7, -3), XYZ(0, 3, 0), XYZ(-3, -0.7, 3), tri_mat);
 
-    Material light_mat;
-    light_mat.color = XYZ(1, 1, 1);
-    light_mat.emission = 5000;
-    light_mat.emissive_color = XYZ(1, 1, 1);
+    Material* light_mat = new Material();
+    light_mat->color = XYZ(1, 1, 1);
+    light_mat->emission = 5000;
+    light_mat->emissive_color = XYZ(1, 1, 1);
     //light_mat.emissive_color = XYZ(1, 0.662, 0.341);
     Sphere* glow_sphere =new Sphere(1, XYZ(-3, 2, 0), light_mat);
 
 
-    Material floor_mat;
-    floor_mat.color = XYZ(1, 1, 1);
-    floor_mat.roughness = 1;
-    floor_mat.metallic = 0;
-    floor_mat.specular = 0;
+    Material* floor_mat = new Material();
+    floor_mat->color = XYZ(1, 1, 1);
+    floor_mat->roughness = 0.2;
+    floor_mat->metallic = 0;
+    floor_mat->specular = 0.5;
     Plane* floor =new Plane(XYZ(0, 1, 0), XYZ(0, -1, 0), floor_mat);
 
+    Material* mesh_mat = new Material();
+    mesh_mat->color = XYZ(1, 0.2, 0.2);
+    mesh_mat->roughness = 0.2;
+    mesh_mat->specular = 0.5;
+    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\fumo.obj",mesh_mat);
+    Object* m_obj = new Object(XYZ(0,0,0),XYZ(0.006));
+    m_obj->addMesh(mesh);
+    
+    m_obj->applyTransformXYZ(0, -1, 0);
+    m_obj->rotateX(PI / 2);
+    m_obj->rotateZ(PI);
+    //scene->register_sphere(my_sphere);
+    //scene->register_sphere(my_sphere_2);
 
-    scene->register_sphere(my_sphere);
-    scene->register_sphere(my_sphere_2);
-
-    scene->register_tri(my_tri);
+    //scene->register_tri(my_tri);
 
     scene->register_sphere(glow_sphere);
     scene->register_plane(floor);
+    scene->register_object(m_obj);
     for (int i = 0; i < spheres.size(); i++) {
         scene->register_sphere(spheres.at(i));
     }
@@ -2075,6 +2426,7 @@ int main()
     xe_seed[2] = rand();
     xe_seed[3] = rand();
 
+    /*
     XYZ direction = XYZ(1, 1, 0);
     direction.normalize();
 
@@ -2085,6 +2437,7 @@ int main()
     for (float i = -PI/2; i <= PI/2; i += PI / 100) {
         //cout << "(" << i << "," << Scos(i) << ")" << endl;
     }
+    */
     //exit(0);
     /*
     int count = 1000;
@@ -2117,17 +2470,27 @@ int main()
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_3 - start_3).count() * 1000) << "/s" << endl;
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_4 - start_4).count() * 1000) << "/s" << endl;
     exit(0);*/
-    
+    /**
     for (int i = 0; i < 0; i++) {
         //XYZ p = VecLib::random_cone(0.1);
         XYZ p = VecLib::aligned_random(0.1, rot);
         cout << "A::" << p.X << "::" << p.Y << "::" << p.Z << "::0::2::A::1::0::0::0::0;" << endl;
     }
+    */
     //exit(0);
+    
 
+    //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
+    
+    //GUI->hold_window();
     SceneManager* scene_manager = load_default_scene();
-   
-    scene_manager->render(1920/2,1080/2,5);
+    scene_manager->render(1920,1080,1);
+    
+    //scene_manager->render(1920 / 10, 1080 / 10, 1);
+    cout << endl << "writing out raw......." << flush;
+    FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
+    cout << "done" << endl;
+    scene_manager->hold_window();
 
 }
 

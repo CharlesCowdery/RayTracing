@@ -156,8 +156,8 @@
   </ItemGroup>
   <ItemGroup>
     <Text Include="Backup1.txt" />
-    <Text Include="backup2.cpp" />
-    <Text Include="V1.cpp" />
+    <Text Include="backup2.txt" />
+    <Text Include="V1.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

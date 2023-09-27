@@ -58,10 +58,10 @@
     <Text Include="Backup1.txt">
       <Filter>Source Files</Filter>
     </Text>
-    <Text Include="backup2.cpp">
+    <Text Include="backup2.txt">
       <Filter>Source Files</Filter>
     </Text>
-    <Text Include="V1.cpp">
+    <Text Include="V1.txt">
       <Filter>Source Files</Filter>
     </Text>
   </ItemGroup>
