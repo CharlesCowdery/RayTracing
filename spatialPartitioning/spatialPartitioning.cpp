@@ -521,6 +521,42 @@ public:
         decimal i = 1 - c;
         return XYZ(first.X * i + second.X * c, first.Y * i + second.Y * c, first.Z * i + second.Z * c);
     }
+    struct less_than_x_operator {
+        inline bool operator() (const XYZ& point1, const XYZ& point2)
+        {
+            return (point1.X < point2.X);
+        }
+    };
+    struct less_than_y_operator {
+        inline bool operator() (const XYZ& point1, const XYZ& point2)
+        {
+            return (point1.Y < point2.Y);
+        }
+    };
+    struct less_than_z_operator {
+        inline bool operator() (const XYZ& point1, const XYZ& point2)
+        {
+            return (point1.Z < point2.Z);
+        }
+    };
+    struct less_than_x_operator_p {
+        inline bool operator() (const XYZ* point1, const XYZ* point2)
+        {
+            return (point1->X < point2->X);
+        }
+    };
+    struct less_than_y_operator_p {
+        inline bool operator() (const XYZ* point1, const XYZ* point2)
+        {
+            return (point1->Y < point2->Y);
+        }
+    };
+    struct less_than_z_operator_p {
+        inline bool operator() (const XYZ* point1, const XYZ* point2)
+        {
+            return (point1->Z < point2->Z);
+        }
+    };
 };
 XYZ operator*(decimal self, const XYZ& point) {
     return point * self;
@@ -541,6 +577,9 @@ struct Quat : public XYZ {
     Quat(decimal _X, decimal _Y, decimal _Z,decimal _W) : XYZ(_X, _Y, _Z), W(_W) {}
     Quat clone() {
         return Quat(X, Y, Z, W);
+    }
+    decimal magnitude() {
+        return Quat::dot(*this, *this);//inefficient but whatever
     }
     static decimal dot(const Quat& q1, const Quat& q2) {
         return q1.X * q2.X + q1.Y * q2.Y + q1.Z * q2.Z + q1.W * q2.W;
@@ -622,31 +661,27 @@ decimal Scos(decimal theta) {
     return 1 - (theta * theta) / 2 + (theta * theta * theta * theta) / 24;
 }
 
-#define LOOKUP_SIZE 1024
-#define LOOKUP_MASK LOOKUP_SIZE-1
+#define LOOKUP_SIZE_TRIG 4096
+#define LOOKUP_SIZE_TRIG_MASK LOOKUP_SIZE_TRIG-1
 
-XYZ lookup[LOOKUP_SIZE];
-
+decimal sin_lookup[LOOKUP_SIZE_TRIG];
+decimal cos_lookup[LOOKUP_SIZE_TRIG];
 
 
 namespace VecLib{
     static void prep() {
-        for (int i = 0; i < LOOKUP_SIZE; i++) {
-            decimal x;
-            decimal y;
-            decimal z;
-            do {
-                x = fRand(-1, 1);
-                y = fRand(0, 1);
-                z = fRand(-1, 1);
-            } while (x * x + y * y + z * z > 1);
-           lookup[i]= XYZ(x, y, z) / sqrt(x * x + y * y + z * z);
+        for (int i = 0; i < LOOKUP_SIZE_TRIG; i++) {
+            sin_lookup[i] = sin((double)i / LOOKUP_SIZE_TRIG * 2 * PI);
+            cos_lookup[i] = cos((double)i / LOOKUP_SIZE_TRIG * 2 * PI);
         }
     }
-    static XYZ lookup_hemi() {
-        int index = xe_next() & (LOOKUP_MASK);
-        cout << index << endl;
-        return lookup[index];
+    static decimal Lsin(decimal input) {
+        int index = ((int)(input * LOOKUP_SIZE_TRIG / (PI * 2))) & LOOKUP_SIZE_TRIG_MASK;
+        return sin_lookup[index];
+    }
+    static decimal Lcos(decimal input) {
+        int index = ((int)(input * LOOKUP_SIZE_TRIG / (PI * 2))) & LOOKUP_SIZE_TRIG_MASK;;
+        return cos_lookup[index];
     }
     static XYZ random_hemi() {
         decimal x;
@@ -659,19 +694,10 @@ namespace VecLib{
         //} while (x * x + y * y + z * z > 1);
         return XYZ(x, y, z)/sqrt(x * x + y * y + z * z);
     }
-    static XYZ fast_random_cone(decimal spread) {
+    static XYZ lookup_random_cone(decimal spread) {
         decimal y_f = fRand(0, spread);
-        decimal z_f = fRand(-PI, PI);
-        decimal mult = 1;
-        if (z_f > PI / 2) {
-            z_f = PI - z_f;
-            mult = -1;
-        }
-        if (z_f < -PI / 2) {
-            z_f = -PI - z_f;
-            mult = -1;
-        }
-        return XYZ(Ssin(y_f) * Scos(z_f) * mult, Scos(z_f), Ssin(y_f) * Ssin(z_f));
+        decimal z_f = fRand(0, 2 * PI);
+        return XYZ(Lsin(y_f) * Lcos(z_f), Lcos(y_f), Lsin(y_f) * Lsin(z_f));
     }
     static XYZ y_random_cone(decimal spread) {
         decimal y = fRand(1, spread);
@@ -679,52 +705,112 @@ namespace VecLib{
         decimal f_y = sqrt(1 - y * y);
         return XYZ(f_y * cos(rot), y, f_y * sin(rot));
     }
-    static XYZ random_cone(decimal spread) {
-        decimal y_f = fRand(0, spread);
-        decimal z_f = fRand(0, 2 * PI);
-        return XYZ(sin(y_f)*cos(z_f), cos(y_f), sin(y_f)*sin(z_f));
-    }
     static XYZ aligned_random(decimal spread, const Quat& r) {
-        return Quat::applyRotation(random_cone(spread), r);
+        return Quat::applyRotation(lookup_random_cone(spread), r);
+    }
+    static decimal surface_area(const XYZ& max, const XYZ& min) {
+        decimal l_x = max.X - min.X;
+        decimal l_y = max.Y - min.Y;
+        decimal l_z = max.Z - min.Z;
+        return (l_x * l_y + l_x * l_z + l_y * l_z)*2;
+    }
+    static decimal volume(const XYZ& max, const XYZ& min) {
+        decimal l_x = max.X - min.X;
+        decimal l_y = max.Y - min.Y;
+        decimal l_z = max.Z - min.Z;
+        return (l_x * l_y * l_z);
+    }
+    static bool between(const XYZ& p1, const XYZ& p2, const XYZ test) {
+        return (
+            (p1.X < test.X && test.X < p1.X) &&
+            (p1.Y < test.Y && test.Y < p1.Y) &&
+            (p1.Z < test.Z && test.Z < p1.Z)
+            );
+    }
+    static bool betweenX(const XYZ& p1, const XYZ& p2, const XYZ test) {
+        return (
+            (p1.X < test.X && test.X < p1.X)
+            );
+    }
+    static bool betweenY(const XYZ& p1, const XYZ& p2, const XYZ test) {
+        return (
+            (p1.Y < test.Y && test.Y < p1.Y)
+            );
+    }
+    static bool betweenZ(const XYZ& p1, const XYZ& p2, const XYZ test) {
+        return (
+            (p1.Z < test.Z && test.Z < p1.Z)
+            );
+    }
+    static bool volumeClip(const XYZ& max_1, const XYZ& min_1, const XYZ& max_2, const XYZ& min_2) {
+        return(
+            (max_2.X < max_1.X) && (max_2.X > min_1.X) || (min_2.X < max_1.X) && (min_2.X > min_1.X) &&
+            (max_2.Y < max_1.Y) && (max_2.Y > min_1.Y) || (min_2.Y < max_1.Y) && (min_2.Y > min_1.Y) &&
+            (max_2.Z < max_1.Z) && (max_2.Z > min_1.Z) || (min_2.Z < max_1.Z) && (min_2.Z > min_1.Z)
+            );
     }
 }
 struct Matrix3x3 {
 public:
-    decimal data[3][3];
+    decimal data[9];
     Matrix3x3() {
-        data[0][0] = 0;
-        data[0][1] = 0;
-        data[0][2] = 0;
-        data[1][0] = 0;
-        data[1][1] = 0;
-        data[1][2] = 0;
-        data[2][0] = 0;
-        data[2][1] = 0;
-        data[2][2] = 0;
+        data[0] = 0;
+        data[1] = 0;
+        data[2] = 0;
+        data[3] = 0;
+        data[4] = 0;
+        data[5] = 0;
+        data[6] = 0;
+        data[7] = 0;
+        data[8] = 0;
     }
     Matrix3x3(decimal a, decimal b, decimal c, decimal d, decimal e, decimal f, decimal g, decimal h, decimal i) {
-        data[0][0] = a;
-        data[0][1] = b;
-        data[0][2] = c;
-        data[1][0] = d;
-        data[1][1] = e;
-        data[1][2] = f;
-        data[2][0] = g;
-        data[2][1] = h;
-        data[2][2] = i;
+        data[0] = a;
+        data[1] = b;
+        data[2] = c;
+        data[3] = d;
+        data[4] = e;
+        data[5] = f;
+        data[6] = g;
+        data[7] = h;
+        data[8] = i;
+    }
+    static Matrix3x3 quatToMatrix(Quat q) {
+        Matrix3x3 m;
+        decimal s = q.magnitude();
+        m.data[0] = 1 - 2 * s * (q.Y * q.Y + q.Z * q.Z);
+        m.data[1] = 2 * s * (q.X * q.Y - q.Z * q.W);
+        m.data[2] = 2 * s * (q.X * q.Z + q.Y * q.W);
+        m.data[3] = 2 * s * (q.X * q.Y + q.Z * q.W);
+        m.data[4] = 1 - 2 * s * (q.X * q.X + q.Z * q.Z);
+        m.data[5] = 2 * s * (q.Y * q.Z - q.X * q.W);
+        m.data[6] = 2 * s * (q.X * q.Z - q.Y * q.W);
+        m.data[7] = 2 * s * (q.Y * q.Z + q.X * q.W);
+        m.data[8] = 1 - 2 * s * (q.X * q.X + q.Y * q.Y);
+        return m;
+    }
+    static XYZ applyRotationMatrix(const XYZ& point, const Matrix3x3& m) {
+        return XYZ(
+            point.X * m.data[0] + point.Y * m.data[1] + point.Z * m.data[2],
+            point.X * m.data[3] + point.Y * m.data[4] + point.Z * m.data[5],
+            point.X * m.data[6] + point.Y * m.data[7] + point.Z * m.data[8]
+        );
+    }
+    static XYZ aligned_random(decimal spread, const Matrix3x3& r) {
+        return applyRotationMatrix(VecLib::lookup_random_cone(spread),r);
     }
     static XYZ multiply_vertically(const Matrix3x3& mat, const XYZ& other) {
         return XYZ(
-            other.X * mat.data[0][0] + other.Y * mat.data[1][0] + other.Z * mat.data[2][0],
-            other.X * mat.data[0][1] + other.Y * mat.data[1][1] + other.Z * mat.data[2][1],
-            other.X * mat.data[0][2] + other.Y * mat.data[1][2] + other.Z * mat.data[2][2]
+            other.X * mat.data[0] + other.Y * mat.data[3] + other.Z * mat.data[6],
+            other.X * mat.data[1] + other.Y * mat.data[4] + other.Z * mat.data[7],
+            other.X * mat.data[2] + other.Y * mat.data[5] + other.Z * mat.data[8]
         );
     }
     static XYZ multiply_horizontally(const Matrix3x3& mat, const XYZ& other) {
         return XYZ(
-            other.X * mat.data[0][0] + other.Y * mat.data[0][1] + other.Z * mat.data[0][2],
-            other.X * mat.data[1][0] + other.Y * mat.data[1][1] + other.Z * mat.data[1][2],
-            other.X * mat.data[2][0] + other.Y * mat.data[2][1] + other.Z * mat.data[2][2]
+            other.X * mat.data[0] + other.Y * mat.data[1] + other.Z * mat.data[2],
+            other.X * mat.data[3] + other.Y * mat.data[4] + other.Z * mat.data[5],
+            other.X * mat.data[6] + other.Y * mat.data[7] + other.Z * mat.data[8]
         );
     }
 };
@@ -745,13 +831,13 @@ public:
 
     decimal k = 0;
     decimal a_2 = 0;
-    decimal spec_f;
-    decimal diff_f;
-    decimal diff_spread;
-    XYZ diff_c;
-    XYZ diff_t;
-    XYZ spec_color;
-    XYZ I_spec;
+    decimal spec_f = 0;
+    decimal diff_f = 0;
+    decimal diff_spread = 0;
+    XYZ diff_c = XYZ();
+    XYZ diff_t = XYZ();
+    XYZ spec_color = XYZ();
+    XYZ I_spec = XYZ();
 
     Material() {}
     Material(XYZ _color) : color(_color) {}
@@ -873,13 +959,13 @@ public:
     XYZ calculate_BRDF(XYZ normal, XYZ input_light, XYZ input_slope, XYZ output_slope) {
         return calculate_BRDF_coefficient(normal, input_slope, output_slope);
     }
-    XYZ random_bounce(const Quat& diffuse_rotation, const Quat& reflection_rotation) {
+    XYZ random_bounce(const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) {
         decimal prob = fRand(0, 1);
         if(prob<diff_f){
-            return VecLib::aligned_random(PI/2, diffuse_rotation);
+            return Matrix3x3::aligned_random(PI/2, diffuse_rotation);
         }
         else {
-            return VecLib::aligned_random(diff_spread, reflection_rotation);
+            return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
         }
 
     }
@@ -951,25 +1037,21 @@ class SpotLight {
 
 struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1;
-    XYZ p2;
-    XYZ p3;
     XYZ normal;
     XYZ p1p3;
     XYZ p1p2;
     Material* material;
     PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material* _material) {
         p1 = p1o + origin;
-        p2 = p2o + origin;
-        p3 = p3o + origin;
-        PackagedTri(p1, p2, p3, _material);
+        XYZ _p2 = p2o + origin;
+        XYZ _p3 = p3o + origin;
+        PackagedTri(p1, _p2, _p3, _material);
     }
     PackagedTri(const XYZ _p1, const XYZ _p2, const XYZ _p3, Material* _material) {
         material = _material;
         p1 = _p1;
-        p2 = _p2;
-        p3 = _p3;
-        p1p3 = p3 - p1;
-        p1p2 = p2 - p1;
+        p1p3 = _p3 - p1;
+        p1p2 = _p2 - p1;
         normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
     }
 };
@@ -979,8 +1061,15 @@ public:
     XYZ p1;
     XYZ p2;
     XYZ p3;
+    XYZ midpoint;
+    XYZ AABB_max;
+    XYZ AABB_min;
     Tri(XYZ _p1, XYZ _p2, XYZ _p3, Material* _material) : Primitive(_material),
-        p1(_p1), p2(_p2), p3(_p3) {}
+        p1(_p1), p2(_p2), p3(_p3) {
+        midpoint = (p1 + p2 + p3) / 3;
+        AABB_max = XYZ::max(p1, XYZ::max(p2, p3));
+        AABB_min = XYZ::min(p1, XYZ::min(p2, p3));
+    }
     //https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/moller-trumbore-ray-triangle-intersection.html
     static decimal intersection_check_MoTru(const PackagedTri& T, const XYZ& position, const XYZ& slope){
         XYZ pvec = XYZ::cross(slope,T.p1p3);
@@ -1014,7 +1103,6 @@ public:
             p1, p2, p3, material
         );
     }
-    
 };
 
 
@@ -1264,6 +1352,23 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
             np1, np2, np3, t.material
         );
     }
+    Tri transformT(Tri& t, Transformation T, XYZ origin, XYZ scale) {
+        XYZ np1 = t.p1 - origin;
+        XYZ np2 = t.p2 - origin;
+        XYZ np3 = t.p3 - origin;
+        np1 *= scale;
+        np2 *= scale;
+        np3 *= scale;
+        T.apply(np1);
+        T.apply(np2);
+        T.apply(np3);
+        np1 += origin;
+        np2 += origin;
+        np3 += origin;
+        return Tri(
+            np1, np2, np3, t.material
+        );
+    }
 }
 
 
@@ -1391,26 +1496,219 @@ private:
     
 };
 
+//http://bannalia.blogspot.com/2015/06/cache-friendly-binary-search.html
+
 class BVH {
-    Scene* scene;
-    XYZ max;
-    XYZ min;
-    BVH(Scene* _scene) : scene(_scene) {}
-    bool intersection(const XYZ origin&, const XYZ& slope) {
-        double tx1 = (b.min.x - r.x0.x) * r.n_inv.x;
-        double tx2 = (b.max.x - r.x0.x) * r.n_inv.x;
-
-        double tmin = min(tx1, tx2);
-        double tmax = max(tx1, tx2);
-
-        double ty1 = (b.min.y - r.x0.y) * r.n_inv.y;
-        double ty2 = (b.max.y - r.x0.y) * r.n_inv.y;
-
-        tmin = max(tmin, min(ty1, ty2));
-        tmax = min(tmax, max(ty1, ty2));
-
-        return tmax >= tmin;
+public:
+    XYZ max = XYZ(0,0,0);
+    XYZ min = XYZ(0,0,0);
+    vector<Tri*> elements;
+    BVH* c1 = nullptr;
+    BVH* c2 = nullptr;
+    BVH() {}
+    BVH(vector<Tri*>* T_vec) {
+        elements = vector<Tri*>(*T_vec);
     }
+    bool intersection(const XYZ& origin, const XYZ& slope, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
+        decimal tx1 = (min.X - origin.X) * inv_slope.X;
+        decimal tx2 = (max.X - origin.X) * inv_slope.X;
+
+        decimal tmin = std::min(tx1, tx2);
+        decimal tmax = std::max(tx1, tx2);
+
+        decimal ty1 = (min.Y - origin.Y) * inv_slope.Y;
+        decimal ty2 = (max.Y - origin.Y) * inv_slope.Y;
+
+        tmin = std::max(tmin, std::min(ty1, ty2));
+        tmax = std::min(tmax, std::max(ty1, ty2));
+
+        decimal tz1 = (min.Z - origin.Z) * inv_slope.Z;
+        decimal tz2 = (max.Z - origin.Z) * inv_slope.Z;
+
+        tmin = std::max(tmin, std::min(tz1, tz2));
+        tmax = std::min(tmax, std::max(tz1, tz2));
+
+        if (tmax >= tmin) { //introduces a branch, but itll probably be fine. Lets me order search checks by nearest intersection
+            return tmax;
+        }
+        else {
+            return -1;
+        }
+    }
+    void construct(vector<Tri*>* geo) {
+
+        if (geo->size() == 0) {
+            cout << "Empty BVH, investigate?" << endl;
+            return;
+        }
+        XYZ total = XYZ();
+        vector<decimal> x_vec;
+        vector<decimal> y_vec;
+        vector<decimal> z_vec;
+        for (const Tri* T_ptr : *geo) {
+            total += T_ptr->midpoint;
+            x_vec.push_back(T_ptr->midpoint.X);
+            y_vec.push_back(T_ptr->midpoint.Y);
+            z_vec.push_back(T_ptr->midpoint.Z);
+        }
+        XYZ average_point = total / geo->size();
+
+        int half = x_vec.size() / 2;
+
+        std::nth_element(x_vec.begin(), x_vec.begin() + half, x_vec.end());
+        std::nth_element(y_vec.begin(), y_vec.begin() + half, y_vec.end());
+        std::nth_element(z_vec.begin(), z_vec.begin() + half, z_vec.end());
+
+        XYZ median = XYZ(
+            x_vec[half],
+            y_vec[half],
+            z_vec[half]
+        );
+
+        vector<Split*> to_test;
+
+        to_test.push_back(new Split(average_point, 0));
+        to_test.push_back(new Split(average_point, 1));
+        to_test.push_back(new Split(average_point, 2));
+        to_test.push_back(new Split(median, 0));
+        to_test.push_back(new Split(median, 1));
+        to_test.push_back(new Split(median, 2));
+
+        Split* final = evaluate(geo, to_test);
+
+        vector<Tri*>* p_geo = new vector<Tri*>();
+        vector<Tri*>* n_geo = new vector<Tri*>();
+
+        for (Tri* T : *geo) {
+            if (VecLib::volumeClip(final->p.max, final->p.min, T->AABB_max, T->AABB_min)) {
+                p_geo->push_back(T);
+            }
+            if (VecLib::volumeClip(final->n.max, final->n.min, T->AABB_max, T->AABB_min)) {
+                n_geo->push_back(T);
+            }
+        }
+        max = XYZ::max(final->p.max, final->n.max);
+        min = XYZ::min(final->p.max, final->n.max);
+
+        if (p_geo->size() < 4) {
+            c1 = new BVH(p_geo);
+        }
+        else {
+            c1 = new BVH();
+            c1->construct(p_geo);
+        }
+        if (n_geo->size() < 4) {
+            c2 = new BVH(n_geo);
+        }
+        else {
+            c2 = new BVH();
+            c2->construct(n_geo);
+        }
+        delete p_geo;
+        delete n_geo;
+    }
+private:
+    
+    struct Stats {
+        XYZ min = XYZ();
+        XYZ max = XYZ();
+        int count = 0;
+        decimal SA() {
+            return VecLib::surface_area(max,min);
+        }
+        decimal volume() {
+            return VecLib::volume(max, min);
+        }
+    };
+    struct Split {
+        Stats p;
+        Stats n;
+        decimal score;
+        XYZ placement;
+        int facing;
+        Split(XYZ place, int _facing):placement(place), facing(_facing) {};
+    };
+    static void operate_stats(Stats& stat, const XYZ& point_max, const XYZ& point_min) {
+        stat.count++;
+        stat.max = XYZ::max(point_max, stat.max);
+        stat.min = XYZ::min(point_min, stat.min);   
+    }
+    static void get_stats(vector<Tri*>* geo, Split& split) {
+        switch (split.facing) {
+        case 0: //X
+            for (const Tri* T_ptr : *geo) {
+                if (T_ptr->AABB_max.X > split.placement.X) {
+                    operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
+                }
+                if (T_ptr->AABB_min.X <= split.placement.X) {
+                    operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
+                }
+            }
+            break;
+        case 1: //Y
+            for (const Tri* T_ptr : *geo) {
+                if (T_ptr->AABB_max.Y > split.placement.Y) {
+                    operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
+                }
+                if (T_ptr->AABB_min.Y <= split.placement.Y) {
+                    operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
+                }
+            }
+            break;
+        case 2: //Z
+            for (const Tri* T_ptr : *geo) {
+                if (T_ptr->AABB_max.Z > split.placement.Z) {
+                    operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
+                }
+                if (T_ptr->AABB_min.Z <= split.placement.Z) {
+                    operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
+                }
+            }
+            break;
+        }
+    }
+    static decimal evaluate_split(vector<Tri*>* geo, Split& split, decimal SA_parent) {
+        const decimal traversal_cost = 1;
+        const decimal intersect_cost = 1;
+        get_stats(geo, split);
+        decimal Sa = split.p.SA()/SA_parent;
+        decimal Sb = split.n.SA()/SA_parent;
+        decimal Ha = Sa * split.p.count * intersect_cost;
+        decimal Hb = Sb * split.n.count * intersect_cost;
+        decimal final_h = traversal_cost + Ha + Hb;
+        split.score = final_h;
+        return final_h;
+    }
+    Split* evaluate(vector<Tri*>* geo, vector<Split*>& to_test) {
+        vector<Split*> tested;
+        while (to_test.size() > 0) {
+            evaluate_split(geo, *(to_test.back()), 1);
+            tested.push_back(to_test.back());
+            to_test.pop_back();
+        }
+        nth_element(tested.begin(), tested.begin(), tested.end(),
+            [](Split* a, Split* b) {return a->score < b->score;}
+        );
+        while (tested.size() > 1) {
+            delete tested.back();
+            tested.pop_back();
+        }
+        return tested[0];
+    }
+    
+};
+
+class PackagedBVH { //less compact but more memory access optimized variant of the BVH class. Used once the tree is finalized.
+    XYZ c1Max;
+    XYZ c1Min;
+    int c1_index;
+    XYZ c2Max;
+    XYZ c2Min;
+    int c2_index;
+    XYZ sMax;
+    XYZ sMin;
+    int s_index;
+    vector<PackagedTri> elements;
 };
 
 struct PackagedRay {
@@ -1459,8 +1757,8 @@ public:
     vector<vector<vector<XYZ*>>> ray_outputs;
     vector<vector<XYZ*>> image_output;
 
-    int current_resolution_x;
-    int current_resolution_y;
+    int current_resolution_x = 0;
+    int current_resolution_y = 0;
 
     Camera(Scene* _scene, XYZ _position, Lens* _lens, decimal focal_distance) : scene(_scene),
         lens(_lens), position(_position), focal_position(XYZ(0,0,-focal_distance)) {}
@@ -1613,10 +1911,13 @@ public:
     vector<PackagedTri> tri_data;
     vector<PointLikeLight> lights;
 
+    BVH* test_bvh = new BVH();
+
     RayEngine() {}
     void prep() {
     }
     void load_scene_objects(Scene* scene) {
+        vector<Tri*> tris;
         for (auto s : scene->spheres) {
             sphere_data.push_back(PackagedSphere(*s));
         }
@@ -1625,17 +1926,23 @@ public:
         }
         for (auto t : scene->tris) {
             tri_data.push_back(t->pack());
+            tris.push_back(t);
         }
         for (auto O : scene->objects) {
             Transformation final_transform = O->final_transform();
             for (Mesh* M : O->meshes) {
-                for(Tri& T: M->tris)
-                tri_data.push_back(Packers::transformedPack(T,final_transform,O->origin,O->scale));
+                for (Tri& T : M->tris) {
+                    tri_data.push_back(Packers::transformedPack(T, final_transform, O->origin, O->scale));
+                    tris.push_back(new Tri(Packers::transformT(T,final_transform,O->origin,O->scale)));
+                }
             }
         }
         for (auto PLL : scene->pointlike_lights) {
             lights.push_back(*PLL);
         }
+        cout << "constructing BVH....." << flush;
+        //test_bvh->construct(&(tris));
+        cout << "done" << endl;
     }
     CastResults execute_ray_cast(XYZ& position,const XYZ& slope) {
         #define default_smallest_distance 9999999;
@@ -1691,6 +1998,8 @@ public:
             XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), results.normal);
             Quat normal_rot = Quat::makeRotation(XYZ(0, 1, 0), results.normal);
             Quat reflection_rot = Quat::makeRotation(XYZ(0,1,0),reflection_slope);
+            Matrix3x3 normal_rot_m = Matrix3x3::quatToMatrix(normal_rot);
+            Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
             //ray_data.PreLL.value = XYZ(0, 0, 100);
             
             if (FULL_BRIGHT) {
@@ -1700,7 +2009,7 @@ public:
                 if (ray_data.remaining_monte_carlo > 0) {
                     for (int i = 0; i < bounce_count; i++) {
                         //XYZ monte_slope = results.material->fast_bounce(results.normal, flipped_output);
-                        XYZ monte_slope = results.material->random_bounce(normal_rot, reflection_rot);
+                        XYZ monte_slope = results.material->random_bounce(normal_rot_m, reflection_rot_m);
                         XYZ return_coefficient = ray_data.coefficient * results.material->fast_BRDF_co(results.normal, monte_slope, flipped_output);
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
                             return;
@@ -1748,6 +2057,7 @@ public:
                 for (const PointLikeLight& PLL : lights) {
                     XYZ light_slope = XYZ::slope(ray_data.position, PLL.origin);
                     Quat light_rot = Quat::makeRotation(XYZ(0, 1, 0), light_slope);
+                    Matrix3x3 light_rot_m = Matrix3x3::quatToMatrix(light_rot);
                     decimal distance = XYZ::distance(ray_data.position, PLL.origin);
                     decimal half_arc = atan(PLL.radius / distance);
                     XYZ light_falloff_coefficient = ray_data.coefficient / (4 * PI * distance * distance);
@@ -1759,7 +2069,7 @@ public:
                             //cast_slope = light_slope+ XYZ(fRand(-0.1, 0.1), fRand(-0.1, 0.1), fRand(-0.1, 0.1));
                             //cast_slope.normalize();
                             
-                            cast_slope = VecLib::aligned_random(half_arc, light_rot);
+                            cast_slope = Matrix3x3::aligned_random(half_arc, light_rot_m);
                         }
                         else {
                             cast_slope = light_slope;
@@ -2065,10 +2375,10 @@ private:
 
         XYZ start_position = emit_coord;
         XYZ starting_coefficient = XYZ(1, 1, 1)/current_samples_per_pixel;
-        int max_bounces = 8;
-        int monte_bounce_count = 0;
-        int diffuse_emit_count = 32;
-        int lighting_emit_count = 1;
+        int max_bounces = 4;
+        int monte_bounce_count = 2;
+        int diffuse_emit_count = 256;
+        int lighting_emit_count = 512;
 
         const int block_size = 16;
 
@@ -2253,7 +2563,7 @@ public:
                         stod(words[2]),
                         stod(words[3])
                     ));
-                cout << verts.back() << endl;
+                //cout << verts.back() << endl;
             }
             if (line_type == "f") {
                 int i0 = stoi(words[1])-1;
@@ -2391,21 +2701,21 @@ SceneManager* load_default_scene() {
     mesh_mat->color = XYZ(1, 0.2, 0.2);
     mesh_mat->roughness = 0.2;
     mesh_mat->specular = 0.5;
-    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\fumo.obj",mesh_mat);
+    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\lowfumo.obj",mesh_mat);
     Object* m_obj = new Object(XYZ(0,0,0),XYZ(0.006));
     m_obj->addMesh(mesh);
     
     m_obj->applyTransformXYZ(0, -1, 0);
     m_obj->rotateX(PI / 2);
     m_obj->rotateZ(PI);
-    //scene->register_sphere(my_sphere);
-    //scene->register_sphere(my_sphere_2);
+    scene->register_sphere(my_sphere);
+    scene->register_sphere(my_sphere_2);
 
-    //scene->register_tri(my_tri);
+    scene->register_tri(my_tri);
 
     scene->register_sphere(glow_sphere);
     scene->register_plane(floor);
-    scene->register_object(m_obj);
+    //scene->register_object(m_obj);
     for (int i = 0; i < spheres.size(); i++) {
         scene->register_sphere(spheres.at(i));
     }
@@ -2426,50 +2736,75 @@ int main()
     xe_seed[2] = rand();
     xe_seed[3] = rand();
 
-    /*
+    
     XYZ direction = XYZ(1, 1, 0);
     direction.normalize();
 
     Quat rot = Quat::makeRotation(XYZ(0,1,0),direction);
+    Matrix3x3 rot_m = Matrix3x3::quatToMatrix(rot);
 
     cout << "A::-1::-1::-1::0::2::A::1::0::0::0::0;" << endl;
     cout << "A::1::1::1::0::2::A::1::0::0::0::0;" << endl;
     for (float i = -PI/2; i <= PI/2; i += PI / 100) {
         //cout << "(" << i << "," << Scos(i) << ")" << endl;
     }
-    */
+    
     //exit(0);
-    /*
-    int count = 1000;
+    
+    int count = 0;
     XYZ out = XYZ();
     VecLib::prep();
+    int num = 512;
+    float t_c_e = 0;
+    float t_s_e = 0;
+    float t_c_e_a = 0;
+    float t_s_e_a = 0;
+    for (int i = 0; i < num; i++) {
+        float f = (float)i / num;
+        float c_error = VecLib::Lcos(f)-cos(f);
+        float s_error = VecLib::Lsin(f)-sin(f);
+        t_c_e += c_error;
+        t_s_e += s_error;
+        t_c_e_a += abs(c_error);
+        t_s_e_a += abs(s_error);
+    }
+    cout << "cosine: total error: " << t_c_e << ", total absolute error: " << t_c_e_a << ", average error: " << t_c_e / num << ", average absolute error: " << t_c_e_a / num << endl;
+    cout << "sine: total error: " << t_s_e << ", total absolute error: " << t_s_e_a << ", average error: " << t_s_e / num << ", average absolute error: " << t_s_e_a / num << endl;
+    cout << endl;
     auto start_1 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count;i++) {
-        volatile XYZ k = VecLib::random_cone(0.1);
+        volatile XYZ k = Matrix3x3::aligned_random(0.1,rot_m);
     }
     auto end_1 = chrono::high_resolution_clock::now();
     auto start_2 = chrono::high_resolution_clock::now();
     decimal f = cos(0.1);
     for (int i = 0; i < count;i++) {
-        volatile XYZ k = (VecLib::y_random_cone(f));
+        volatile XYZ k = (VecLib::aligned_random(0.1,rot));
     }
     auto end_2 = chrono::high_resolution_clock::now();
     auto start_3 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count;i++) {
-        volatile XYZ k = VecLib::random_hemi();
+        //volatile XYZ k = VecLib::random_hemi();
     }
     auto end_3 = chrono::high_resolution_clock::now();
     auto start_4 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count;i++) {
-        volatile XYZ k = VecLib::lookup_hemi();
+        //volatile XYZ k = VecLib::lookup_hemi();
     }
     auto end_4 = chrono::high_resolution_clock::now();
+    auto start_5 = chrono::high_resolution_clock::now();
+    for (int i = 0; i < count;i++) {
+        //volatile XYZ k = VecLib::lookup_random_cone(0.1);
+    }
+    auto end_5 = chrono::high_resolution_clock::now();
     cout << out << endl;
     cout << intToEng((double)count/chrono::duration_cast<chrono::milliseconds>(end_1 - start_1).count()*1000) << "/s" << endl;
     cout << intToEng((double)count/chrono::duration_cast<chrono::milliseconds>(end_2 - start_2).count()*1000) << "/s" << endl;
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_3 - start_3).count() * 1000) << "/s" << endl;
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_4 - start_4).count() * 1000) << "/s" << endl;
-    exit(0);*/
+    cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_5 - start_5).count() * 1000) << "/s" << endl;
+
+    //exit(0);
     /**
     for (int i = 0; i < 0; i++) {
         //XYZ p = VecLib::random_cone(0.1);
@@ -2484,7 +2819,7 @@ int main()
     
     //GUI->hold_window();
     SceneManager* scene_manager = load_default_scene();
-    scene_manager->render(1920,1080,1);
+    scene_manager->render(1920/2,1080/2,1);
     
     //scene_manager->render(1920 / 10, 1080 / 10, 1);
     cout << endl << "writing out raw......." << flush;
