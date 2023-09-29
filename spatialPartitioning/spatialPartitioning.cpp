@@ -416,9 +416,13 @@ public:
         decimal f3 = point.Z - other.Z;
         return sqrt(f1 * f1 + f2 * f2 + f3 * f3);
     }
-    static XYZ slope(XYZ point, XYZ other) {
+    static XYZ slope(const XYZ& point, const XYZ& other) {
         decimal distance = XYZ::distance(point, other);
         return (other - point) / distance;
+    }
+    static XYZ test_slope(const XYZ& point, const XYZ& other) {
+        XYZ delta = other - point;
+        return delta / XYZ::dot(delta, delta);
     }
     static XYZ flip(XYZ point) {
         return XYZ(-point.X, -point.Y, -point.Z);
@@ -459,6 +463,21 @@ public:
     }
     static XYZ negative(const XYZ& v) {
         return XYZ(-v.X, -v.Y, -v.Z);
+    }
+    static XYZ random(decimal nRx, decimal Rx, decimal nRy, decimal Ry, decimal nRz, decimal Rz) {
+        return XYZ(
+            fRand(nRx, Rx),
+            fRand(nRy, Ry),
+            fRand(nRz, Rz)
+        );
+    }
+    static XYZ random(decimal Rx, decimal Ry, decimal Rz) {
+        return random(
+            -Rx, Rx, -Ry, Ry, -Rz, Rz
+        );
+    }
+    static XYZ random(decimal range = 1) {
+        return random(range, range, range);
     }
     string to_string() {
         return std::to_string(X) + ", " + std::to_string(Y) + ", " + std::to_string(Z);
@@ -558,10 +577,10 @@ public:
         }
     };
 };
-XYZ operator*(decimal self, const XYZ& point) {
+XYZ operator*(const decimal& self, const XYZ& point){
     return point * self;
 }
-XYZ operator-(decimal self, const XYZ& point) {
+XYZ operator-(const decimal& self, const XYZ& point) {
     return point + self;
 }
 
@@ -2751,7 +2770,7 @@ int main()
     
     //exit(0);
     
-    int count = 0;
+    int count = pow(10,8);
     XYZ out = XYZ();
     VecLib::prep();
     int num = 512;
@@ -2773,23 +2792,23 @@ int main()
     cout << endl;
     auto start_1 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count;i++) {
-        volatile XYZ k = Matrix3x3::aligned_random(0.1,rot_m);
+        out+= Matrix3x3::aligned_random(0.1,rot_m);
     }
     auto end_1 = chrono::high_resolution_clock::now();
     auto start_2 = chrono::high_resolution_clock::now();
     decimal f = cos(0.1);
     for (int i = 0; i < count;i++) {
-        volatile XYZ k = (VecLib::aligned_random(0.1,rot));
+        out+= (VecLib::aligned_random(0.1,rot));
     }
     auto end_2 = chrono::high_resolution_clock::now();
     auto start_3 = chrono::high_resolution_clock::now();
-    for (int i = 0; i < count;i++) {
-        //volatile XYZ k = VecLib::random_hemi();
+    for (int i = 0; i < count*2;i+=2) {
+        out+= XYZ::test_slope(XYZ::random(100), XYZ::random(100));
     }
     auto end_3 = chrono::high_resolution_clock::now();
     auto start_4 = chrono::high_resolution_clock::now();
-    for (int i = 0; i < count;i++) {
-        //volatile XYZ k = VecLib::lookup_hemi();
+    for (int i = 0; i < count * 2;i += 2) {
+        out+= XYZ::slope(XYZ::random(100), XYZ::random(100));
     }
     auto end_4 = chrono::high_resolution_clock::now();
     auto start_5 = chrono::high_resolution_clock::now();
