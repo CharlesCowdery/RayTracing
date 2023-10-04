@@ -15,6 +15,7 @@
 #include <array>
 #include <unordered_set>
 #include <thread>
+#include <queue>
 
 #include <cassert>
 #include <intrin.h>
@@ -416,13 +417,16 @@ public:
         decimal f3 = point.Z - other.Z;
         return sqrt(f1 * f1 + f2 * f2 + f3 * f3);
     }
-    static XYZ slope(const XYZ& point, const XYZ& other) {
+    static XYZ _rtslope(const XYZ& point, const XYZ& other) {
         decimal distance = XYZ::distance(point, other);
         return (other - point) / distance;
     }
-    static XYZ test_slope(const XYZ& point, const XYZ& other) {
+    static XYZ _dotslope(const XYZ& point, const XYZ& other) {
         XYZ delta = other - point;
         return delta / XYZ::dot(delta, delta);
+    }
+    static XYZ slope(const XYZ& point, const XYZ& other) {
+        return _rtslope(point, other);
     }
     static XYZ flip(XYZ point) {
         return XYZ(-point.X, -point.Y, -point.Z);
@@ -480,7 +484,7 @@ public:
         return random(range, range, range);
     }
     string to_string() {
-        return std::to_string(X) + ", " + std::to_string(Y) + ", " + std::to_string(Z);
+        return "("+std::to_string(X) + ", " + std::to_string(Y) + ", " + std::to_string(Z)+")";
     }
     XYZ operator/(const XYZ& other) const {
         return XYZ(X / other.X, Y / other.Y, Z / other.Z);
@@ -582,6 +586,9 @@ XYZ operator*(const decimal& self, const XYZ& point){
 }
 XYZ operator-(const decimal& self, const XYZ& point) {
     return point + self;
+}
+XYZ operator/(const decimal& self, const XYZ& point) {
+    return XYZ::divide(self,point);
 }
 
 std::ostream& operator<<(std::ostream& os, XYZ& m) {
@@ -762,11 +769,22 @@ namespace VecLib{
             );
     }
     static bool volumeClip(const XYZ& max_1, const XYZ& min_1, const XYZ& max_2, const XYZ& min_2) {
-        return(
-            (max_2.X < max_1.X) && (max_2.X > min_1.X) || (min_2.X < max_1.X) && (min_2.X > min_1.X) &&
-            (max_2.Y < max_1.Y) && (max_2.Y > min_1.Y) || (min_2.Y < max_1.Y) && (min_2.Y > min_1.Y) &&
-            (max_2.Z < max_1.Z) && (max_2.Z > min_1.Z) || (min_2.Z < max_1.Z) && (min_2.Z > min_1.Z)
+        bool term1 = (max_1.X >= min_2.X && max_2.X >= min_1.X);
+        bool term2 = (max_1.Y >= min_2.Y && max_2.Y >= min_1.Y);
+        bool term3 = (max_1.Z >= min_2.Z && max_2.Z >= min_1.Z);
+        return term1 && term2 && term3;
+        /*bool term1 = (
+            (((max_2.X < max_1.X) && (max_2.X > min_1.X)) || ((min_2.X < max_1.X) && (min_2.X > min_1.X))) &&
+            (((max_2.Y < max_1.Y) && (max_2.Y > min_1.Y)) || ((min_2.Y < max_1.Y) && (min_2.Y > min_1.Y))) &&
+            (((max_2.Z < max_1.Z) && (max_2.Z > min_1.Z)) || ((min_2.Z < max_1.Z) && (min_2.Z > min_1.Z)))
             );
+        return term1;*/
+    }
+    static bool volumeContains(const XYZ& max, const XYZ& min, const XYZ& point) {
+        bool t1 = (point.X<max.X && point.X>min.X);
+        bool t2 = (point.Y<max.Y && point.Y>min.Y);
+        bool t3 = (point.Z<max.Z && point.Z>min.Z);
+        return t1&&t2&&t3;
     }
 }
 struct Matrix3x3 {
@@ -1095,9 +1113,9 @@ public:
         decimal det = XYZ::dot(T.p1p2,pvec);
         // if the determinant is negative, the triangle is 'back facing'
         // if the determinant is close to 0, the ray misses the triangle
-        //if (det < kEpsilon) return false;
+        if (det < kEpsilon) return -1;
         // ray and triangle are parallel if det is close to 0
-        if (fabs(det) < kEpsilon) return -1;
+        //if (fabs(det) < kEpsilon) return -1;
         decimal invDet = 1 / det;
 
         XYZ tvec = position - T.p1;
@@ -1516,19 +1534,26 @@ private:
 };
 
 //http://bannalia.blogspot.com/2015/06/cache-friendly-binary-search.html
+int total = 0;
 
 class BVH {
 public:
     XYZ max = XYZ(0,0,0);
     XYZ min = XYZ(0,0,0);
-    vector<Tri*> elements;
+    vector<Tri*>* elements = nullptr;
+    vector<PackagedTri> packedEl;
     BVH* c1 = nullptr;
     BVH* c2 = nullptr;
     BVH() {}
     BVH(vector<Tri*>* T_vec) {
-        elements = vector<Tri*>(*T_vec);
+        elements = new vector<Tri*>(*T_vec);
+        total += T_vec->size();
+        for (Tri* T_ptr : *T_vec) {
+            max = XYZ::max(max, T_ptr->AABB_max);
+            min = XYZ::min(min, T_ptr->AABB_min);
+        }
     }
-    bool intersection(const XYZ& origin, const XYZ& slope, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
+    decimal intersection(const XYZ& origin, const XYZ& slope, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
         decimal tx1 = (min.X - origin.X) * inv_slope.X;
         decimal tx2 = (max.X - origin.X) * inv_slope.X;
 
@@ -1554,12 +1579,172 @@ public:
             return -1;
         }
     }
-    void construct(vector<Tri*>* geo) {
-
-        if (geo->size() == 0) {
-            cout << "Empty BVH, investigate?" << endl;
-            return;
+    void prep() {
+        if (c1 != nullptr) {
+            c1->prep();
+            c2->prep();
         }
+        else {
+            for (Tri* t : *elements) {
+                packedEl.push_back(t->pack());
+            }
+            delete elements;
+        }
+    }
+    struct WorkPacket {
+        BVH* target;
+        vector<Tri*>* contents;
+        WorkPacket(BVH* t, vector<Tri*>* c) : target(t), contents(c) {}
+    };
+    void construct(vector<Tri*>* initial_geo) {
+        queue<WorkPacket> packets;
+        assertm((initial_geo->size() > 0), "BVH was creation was attempted with zero geometry. Did everything load right?");
+        auto initial_packet = WorkPacket(this,initial_geo);
+        packets.push(initial_packet);
+        int i = 0;
+        bool max_size = true;
+        while (packets.size() > 0) {
+            i++;
+            WorkPacket packet = packets.front();
+            vector<Tri*>* geo = packet.contents;
+            BVH* target = packet.target;
+
+            assertm(geo->size() > 0, "zero size bin");
+
+            Split* split = probe(geo);
+            auto bins = bin(split, geo);
+
+            target->max = bins.max;
+            target->min = bins.min;
+
+            assertm(std::abs((int)(bins.p_geo->size() - bins.n_geo->size())) < geo->size(), "");
+
+
+            if (max_size) {
+                max_size = false;
+                cout << target->max << " " << target->min << endl;
+            }
+
+            if (bins.p_geo->size() <= 4) {
+                assertm(bins.p_geo->size() > 0, "attempted bin creation of zero elements");
+                target->c1 = new BVH(bins.p_geo);
+            }
+            else {
+                BVH* leaf = new BVH();
+                target->c1 = leaf;
+                WorkPacket k = WorkPacket(leaf, bins.p_geo);
+                packets.push(k);
+            }
+            if (bins.n_geo->size() <= 4) {
+                assertm(bins.n_geo->size() > 0, "attempted bin creation of zero elements");
+                target->c2 = new BVH(bins.n_geo);
+            }
+            else {
+                BVH* leaf = new BVH();
+                target->c2 = leaf;
+                WorkPacket k = WorkPacket(leaf, bins.n_geo);
+                packets.push(k);
+            }
+            delete geo;
+            packets.pop();
+        }
+        cout << "BVH leaf count: " << i << endl;
+    }
+    pair<vector<BVH*>*,vector<Tri*>*> flatten(int depth = 0) {
+        vector<BVH*>* l = new vector<BVH*>();
+        vector<Tri*>* t = new vector<Tri*>();
+
+        flatten(l,t,depth);
+        return pair<vector<BVH*>*, vector<Tri*>*>(l,t);
+    }
+    void flatten(vector<BVH*>* l, vector<Tri*>* t, int depth) {
+        depth = depth - 1;
+        l->push_back(this);
+        if (depth != 0) {
+            if (c1 != nullptr) {
+                c1->flatten(l, t, depth);
+            }
+            if (c2 != nullptr) {
+                c2->flatten(l, t, depth);
+            }
+            if (elements != nullptr) {
+                for (auto T : *elements) {
+                    t->push_back(T);
+                }
+            }
+        }
+    }
+    
+private:
+    struct BinResults {
+        vector<Tri*>* p_geo;
+        vector<Tri*>* n_geo;
+        XYZ max;
+        XYZ min;
+    };
+    struct Stats {
+        XYZ min = XYZ(99999999999);
+        XYZ max = XYZ();
+        int count = 0;
+        decimal SA() {
+            return VecLib::surface_area(max,min);
+        }
+        decimal volume() {
+            return VecLib::volume(max, min);
+        }
+    };
+    struct Split {
+        Stats p;
+        Stats n;
+        decimal score;
+        XYZ placement;
+        int facing;
+        Split(XYZ place, int _facing):placement(place), facing(_facing) {};
+    };
+    BinResults bin(Split* split, vector<Tri*>* geo) {
+        BinResults results;
+        results.p_geo = new vector<Tri*>();
+        results.n_geo = new vector<Tri*>();
+
+        switch (split->facing) {
+        case 0: //X
+            for (Tri* T_ptr : *geo) {
+                if (T_ptr->midpoint.X > split->placement.X) {
+                    results.p_geo->push_back(T_ptr);
+                }
+                if (T_ptr->midpoint.X <= split->placement.X) {
+                    results.n_geo->push_back(T_ptr);
+                }
+            }
+            break;
+        case 1: //Y
+            for (Tri* T_ptr : *geo) {
+                if (T_ptr->midpoint.Y > split->placement.Y) {
+                    results.p_geo->push_back(T_ptr);
+                }
+                if (T_ptr->midpoint.Y <= split->placement.Y) {
+                    results.n_geo->push_back(T_ptr);
+                }
+            }
+            break;
+        case 2: //Z
+            for (Tri* T_ptr : *geo) {
+                if (T_ptr->midpoint.Z > split->placement.Z) {
+                    results.p_geo->push_back(T_ptr);
+                }
+                if (T_ptr->midpoint.Z <= split->placement.Z) {
+                    results.n_geo->push_back(T_ptr);
+                }
+            }
+            break;
+        }
+        for (Tri* T_ptr : *geo) {
+            results.max = XYZ::max(results.max, T_ptr->AABB_max);
+            results.min = XYZ::min(results.min, T_ptr->AABB_min);
+        }
+        return results;
+    }
+    Split* probe(vector<Tri*>* geo) {
         XYZ total = XYZ();
         vector<decimal> x_vec;
         vector<decimal> y_vec;
@@ -1586,67 +1771,16 @@ public:
 
         vector<Split*> to_test;
 
-        to_test.push_back(new Split(average_point, 0));
-        to_test.push_back(new Split(average_point, 1));
-        to_test.push_back(new Split(average_point, 2));
+        //to_test.push_back(new Split(average_point, 0));
+        //to_test.push_back(new Split(average_point, 1));
+        //to_test.push_back(new Split(average_point, 2));
         to_test.push_back(new Split(median, 0));
         to_test.push_back(new Split(median, 1));
         to_test.push_back(new Split(median, 2));
 
         Split* final = evaluate(geo, to_test);
-
-        vector<Tri*>* p_geo = new vector<Tri*>();
-        vector<Tri*>* n_geo = new vector<Tri*>();
-
-        for (Tri* T : *geo) {
-            if (VecLib::volumeClip(final->p.max, final->p.min, T->AABB_max, T->AABB_min)) {
-                p_geo->push_back(T);
-            }
-            if (VecLib::volumeClip(final->n.max, final->n.min, T->AABB_max, T->AABB_min)) {
-                n_geo->push_back(T);
-            }
-        }
-        max = XYZ::max(final->p.max, final->n.max);
-        min = XYZ::min(final->p.max, final->n.max);
-
-        if (p_geo->size() < 4) {
-            c1 = new BVH(p_geo);
-        }
-        else {
-            c1 = new BVH();
-            c1->construct(p_geo);
-        }
-        if (n_geo->size() < 4) {
-            c2 = new BVH(n_geo);
-        }
-        else {
-            c2 = new BVH();
-            c2->construct(n_geo);
-        }
-        delete p_geo;
-        delete n_geo;
+        return final;
     }
-private:
-    
-    struct Stats {
-        XYZ min = XYZ();
-        XYZ max = XYZ();
-        int count = 0;
-        decimal SA() {
-            return VecLib::surface_area(max,min);
-        }
-        decimal volume() {
-            return VecLib::volume(max, min);
-        }
-    };
-    struct Split {
-        Stats p;
-        Stats n;
-        decimal score;
-        XYZ placement;
-        int facing;
-        Split(XYZ place, int _facing):placement(place), facing(_facing) {};
-    };
     static void operate_stats(Stats& stat, const XYZ& point_max, const XYZ& point_min) {
         stat.count++;
         stat.max = XYZ::max(point_max, stat.max);
@@ -1656,30 +1790,30 @@ private:
         switch (split.facing) {
         case 0: //X
             for (const Tri* T_ptr : *geo) {
-                if (T_ptr->AABB_max.X > split.placement.X) {
+                if (T_ptr->midpoint.X > split.placement.X) {
                     operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
                 }
-                if (T_ptr->AABB_min.X <= split.placement.X) {
+                if (T_ptr->midpoint.X <= split.placement.X) {
                     operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
                 }
             }
             break;
         case 1: //Y
             for (const Tri* T_ptr : *geo) {
-                if (T_ptr->AABB_max.Y > split.placement.Y) {
+                if (T_ptr->midpoint.Y > split.placement.Y) {
                     operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
                 }
-                if (T_ptr->AABB_min.Y <= split.placement.Y) {
+                if (T_ptr->midpoint.Y <= split.placement.Y) {
                     operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
                 }
             }
             break;
         case 2: //Z
             for (const Tri* T_ptr : *geo) {
-                if (T_ptr->AABB_max.Z > split.placement.Z) {
+                if (T_ptr->midpoint.Z > split.placement.Z) {
                     operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
                 }
-                if (T_ptr->AABB_min.Z <= split.placement.Z) {
+                if (T_ptr->midpoint.Z <= split.placement.Z) {
                     operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
                 }
             }
@@ -1695,8 +1829,12 @@ private:
         decimal Ha = Sa * split.p.count * intersect_cost;
         decimal Hb = Sb * split.n.count * intersect_cost;
         decimal final_h = traversal_cost + Ha + Hb;
+        if (split.p.count == 0 || split.n.count == 0) {
+            final_h = 99999999999;
+        }
         split.score = final_h;
         return final_h;
+        //return (split.p.count+split.n.count)/geo->size()*(split.p.count+split.n.count);
     }
     Split* evaluate(vector<Tri*>* geo, vector<Split*>& to_test) {
         vector<Split*> tested;
@@ -1841,7 +1979,9 @@ template <typename T, int max_size> struct DataBlock {
 struct CastResults {
     XYZ normal;
     Material* material;
-    CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat) {}
+    decimal distance;
+    CastResults() : normal(XYZ()), material(nullptr), distance(999999999999999) {};
+    CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat), distance(9999999999999) {}
 };
 
 struct Casting_Diagnostics {
@@ -1960,18 +2100,90 @@ public:
             lights.push_back(*PLL);
         }
         cout << "constructing BVH....." << flush;
-        //test_bvh->construct(&(tris));
+        test_bvh->construct(new vector<Tri*>(tris));
+        test_bvh->prep();
         cout << "done" << endl;
     }
-    CastResults execute_ray_cast(XYZ& position,const XYZ& slope) {
+    void navBVH(BVH* bvh, CastResults& res, XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+            if (bvh->c1 != nullptr) {
+                decimal t1 = bvh->c1->intersection(position, slope, inv_slope);
+                decimal t2 = bvh->c2->intersection(position, slope, inv_slope);
+                if (t1 < 0 && t2 < 0) {
+                    return;
+                }
+                if (t1 < 0) {
+                    navBVH(bvh->c2, res, position, slope, inv_slope);
+                    return;
+                }
+                if (t2 < 0) {
+                    navBVH(bvh->c1, res, position, slope, inv_slope);
+                    return;
+                }
+                navBVH(bvh->c2, res, position, slope, inv_slope);
+                navBVH(bvh->c1, res, position, slope, inv_slope);
+                return;
+                if (t1 < t2) {
+                    navBVH(bvh->c1, res, position, slope, inv_slope);
+                    if (t2<res.distance) {
+                        navBVH(bvh->c2, res, position, slope, inv_slope);
+                    }
+                }
+                else {
+                    navBVH(bvh->c2, res, position, slope, inv_slope);
+                    if (t1<res.distance) {
+                        navBVH(bvh->c1, res, position, slope, inv_slope);
+                    }
+                } 
+            }
+            else {
+                for (const PackagedTri& t : bvh->packedEl) {
+                    decimal distance = Tri::intersection_check(t, position, slope);
+                    if (distance >= 0) {
+                        if (distance < res.distance) {
+                            res.distance = distance;
+                            res.normal = Tri::get_normal(t.normal, position);
+                            res.material = t.material;
+                        }
+                    }
+                }
+            }
+    }
+    CastResults execute_bvh_cast(XYZ& position, const XYZ& slope) {
+        CastResults returner;
+        for (const PackagedSphere& s : sphere_data) {
+            decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
+            if (distance >= 0) {
+                if (distance < returner.distance) {
+                    returner.distance = distance;
+                    returner.normal = Sphere::normal(s.origin, position + distance * slope);
+                    returner.material = s.material;
+                }
+            }
+        }
+        for (const PackagedPlane& p : plane_data) {
+            decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
+            if (distance >= 0) {
+                if (distance < returner.distance) {
+                    returner.distance = distance;
+                    returner.normal = p.normal;
+                    returner.material = p.material;
+                }
+            }
+        }
+        XYZ inv_slope = XYZ(1) / slope;
+        navBVH(test_bvh, returner, position, slope, inv_slope);
+        position += returner.distance * slope;
+        return returner;
+    }
+    CastResults execute_naive_cast(XYZ& position,const XYZ& slope) {
         #define default_smallest_distance 9999999;
         decimal smallest_distance = default_smallest_distance;
         CastResults returner = CastResults(XYZ(-1,-1,-1),nullptr);
         for (const PackagedSphere& s : sphere_data) {
             decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
             if (distance >= 0) {
-                if (distance < smallest_distance) {
-                    smallest_distance = distance;
+                if (distance < returner.distance) {
+                    returner.distance = distance;
                     returner.normal = Sphere::normal(s.origin, position+distance*slope);
                     returner.material = s.material;
                 }
@@ -1980,8 +2192,8 @@ public:
         for (const PackagedPlane& p : plane_data) {
             decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
             if (distance >= 0) {
-                if (distance < smallest_distance) {
-                    smallest_distance = distance;
+                if (distance < returner.distance) {
+                    returner.distance = distance;
                     returner.normal = p.normal;
                     returner.material = p.material;
                 }
@@ -1990,15 +2202,18 @@ public:
         for (const PackagedTri& t : tri_data) {
             decimal distance = Tri::intersection_check(t, position, slope);
             if (distance >= 0) {
-                if (distance < smallest_distance) {
-                    smallest_distance = distance;
+                if (distance < returner.distance) {
+                    returner.distance = distance;
                     returner.normal = Tri::get_normal(t.normal,position);
                     returner.material = t.material;
                 }
             }
         }
-        position += smallest_distance * slope;
+        position += returner.distance * slope;
         return returner;
+    }
+    CastResults execute_ray_cast(XYZ& position, const XYZ& slope) {
+        return execute_bvh_cast(position, slope);
     }
     void process_ray(Casting_Diagnostics& stats, PackagedRay& ray_data) {
         stats.rays_processed++;
@@ -2394,10 +2609,10 @@ private:
 
         XYZ start_position = emit_coord;
         XYZ starting_coefficient = XYZ(1, 1, 1)/current_samples_per_pixel;
-        int max_bounces = 4;
-        int monte_bounce_count = 2;
+        int max_bounces = 2;
+        int monte_bounce_count = 0;
         int diffuse_emit_count = 256;
-        int lighting_emit_count = 512;
+        int lighting_emit_count = 2;
 
         const int block_size = 16;
 
@@ -2655,7 +2870,7 @@ SceneManager* load_default_scene() {
     Scene* scene = new Scene();
 
     Lens* lens = new RectLens(1, 0.5625);
-    Camera* camera = new Camera(scene, XYZ(0, 0.2, -10), lens , XYZ(0,0,-1));
+    Camera* camera = new Camera(scene, XYZ(0, 0.2, -10), lens , XYZ(0,0,-10));
 
 
     vector<Sphere*> spheres;
@@ -2720,21 +2935,21 @@ SceneManager* load_default_scene() {
     mesh_mat->color = XYZ(1, 0.2, 0.2);
     mesh_mat->roughness = 0.2;
     mesh_mat->specular = 0.5;
-    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\lowfumo.obj",mesh_mat);
-    Object* m_obj = new Object(XYZ(0,0,0),XYZ(0.006));
+    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\Documents\\headlow.obj", mesh_mat);
+    //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\fumo.obj",mesh_mat);
+    Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
     m_obj->addMesh(mesh);
-    
-    m_obj->applyTransformXYZ(0, -1, 0);
-    m_obj->rotateX(PI / 2);
-    m_obj->rotateZ(PI);
-    scene->register_sphere(my_sphere);
-    scene->register_sphere(my_sphere_2);
+    m_obj->applyTransformXYZ(0, 0, 0);
+    m_obj->rotateX(0);
+    m_obj->rotateY(0);
+    m_obj->rotateZ(0);
 
-    scene->register_tri(my_tri);
-
+    //scene->register_sphere(my_sphere);
+    //scene->register_sphere(my_sphere_2);
+    //scene->register_tri(my_tri);
     scene->register_sphere(glow_sphere);
-    scene->register_plane(floor);
-    //scene->register_object(m_obj);
+    //scene->register_plane(floor);
+    scene->register_object(m_obj);
     for (int i = 0; i < spheres.size(); i++) {
         scene->register_sphere(spheres.at(i));
     }
@@ -2748,6 +2963,7 @@ SceneManager* load_default_scene() {
 
 int main()
 {
+    cout << std::numeric_limits<float>::epsilon() << endl;
     srand(0);
 
     xe_seed[0] = rand();
@@ -2792,23 +3008,23 @@ int main()
     cout << endl;
     auto start_1 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count;i++) {
-        out+= Matrix3x3::aligned_random(0.1,rot_m);
+        //out+= Matrix3x3::aligned_random(0.1,rot_m);
     }
     auto end_1 = chrono::high_resolution_clock::now();
     auto start_2 = chrono::high_resolution_clock::now();
     decimal f = cos(0.1);
     for (int i = 0; i < count;i++) {
-        out+= (VecLib::aligned_random(0.1,rot));
+        //out+= (VecLib::aligned_random(0.1,rot));
     }
     auto end_2 = chrono::high_resolution_clock::now();
     auto start_3 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count*2;i+=2) {
-        out+= XYZ::test_slope(XYZ::random(100), XYZ::random(100));
+        //out+= XYZ::test_slope(XYZ::random(100), XYZ::random(100));
     }
     auto end_3 = chrono::high_resolution_clock::now();
     auto start_4 = chrono::high_resolution_clock::now();
     for (int i = 0; i < count * 2;i += 2) {
-        out+= XYZ::slope(XYZ::random(100), XYZ::random(100));
+        //out+= XYZ::slope(XYZ::random(100), XYZ::random(100));
     }
     auto end_4 = chrono::high_resolution_clock::now();
     auto start_5 = chrono::high_resolution_clock::now();
@@ -2839,8 +3055,53 @@ int main()
     //GUI->hold_window();
     SceneManager* scene_manager = load_default_scene();
     scene_manager->render(1920/2,1080/2,1);
-    
+    /*auto l = scene_manager->RE.test_bvh->flatten(-1);
+    cout << l.first->size() << endl;
+    string out_s = "join(";
+    int max = min((int)l.first->size(), 1000);
+    for (int i = 0; i < max;i++) {
+        BVH* b = l.first->at(i);
+        //Tri* t = l.second->at(i);
+        //XYZ M = t->AABB_max;
+        //XYZ m = t->AABB_min;
+        XYZ M = b->max;
+        XYZ m = b->min;
+        string piece = "B(";
+        piece += M.to_string();
+        piece += ", ";
+        piece += m.to_string();
+        piece += ")";
+        if (i < max - 1) {
+            piece += ",";
+        }
+        piece += " ";
+        out_s += piece;
+    }
+    //cout << out_s << ")" << flush;
+    out_s = "triangle(";
+    string v1 = "[";
+    string v2 = "[";
+    string v3 = "[";
+    max = min((int)l.second->size(), 2000);
+    for (int i = 0; i < max;i++) {
+        if (i > 0) {
+            v1 += ",";
+            v2 += ",";
+            v3 += ",";
+        }
+        Tri* t = l.second->at(i);
+        v1 += t->p1.to_string();
+        v2 += t->p2.to_string();
+        v3 += t->p3.to_string();
+    }
+    v1 += "]";
+    v2 += "]";
+    v3 += "]";
+    out_s += v1 + ", " + v2 + ", " + v3 + ")";
+    //cout << out_s << flush;
+    //exit(0);
     //scene_manager->render(1920 / 10, 1080 / 10, 1);
+    */
     cout << endl << "writing out raw......." << flush;
     FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
     cout << "done" << endl;
