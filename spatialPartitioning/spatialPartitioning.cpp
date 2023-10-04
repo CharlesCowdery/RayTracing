@@ -33,9 +33,10 @@
 
 #define PI 3.1415
 
-#define kEpsilon 0.0001
+#define kEpsilon 0.000000001
 
 #define FULL_BRIGHT false
+#define DEPTH_VIEW false
 
 #define OBJECT_CULLING true
 #define CULL_RECEDING_OBJECTS true
@@ -531,7 +532,10 @@ public:
     XYZ operator-() {
         return XYZ(-X, -Y, -Z);
     }
-    bool operator !=(const XYZ& other) {
+    bool operator !=(const XYZ& other){
+        return !((X == other.X) && (Y == other.Y) && (Z == other.Z));
+    }
+    bool operator !=(XYZ& other){
         return !((X == other.X) && (Y == other.Y) && (Z == other.Z));
     }
     static bool equals(const XYZ& point, const XYZ& other) {
@@ -1535,6 +1539,7 @@ private:
 
 //http://bannalia.blogspot.com/2015/06/cache-friendly-binary-search.html
 int total = 0;
+decimal shortest = 99;
 
 class BVH {
 public:
@@ -1552,6 +1557,7 @@ public:
             max = XYZ::max(max, T_ptr->AABB_max);
             min = XYZ::min(min, T_ptr->AABB_min);
         }
+        
     }
     decimal intersection(const XYZ& origin, const XYZ& slope, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
         decimal tx1 = (min.X - origin.X) * inv_slope.X;
@@ -1573,13 +1579,23 @@ public:
         tmax = std::min(tmax, std::max(tz1, tz2));
 
         if (tmax >= tmin) { //introduces a branch, but itll probably be fine. Lets me order search checks by nearest intersection
-            return tmax;
+            if (tmin >= 0) {
+                return tmin;
+            }
+            else {
+                return tmax;
+            }
         }
         else {
             return -1;
         }
     }
     void prep() {
+        //XYZ avg = (max + min) / 2;
+        //XYZ max_ad = max - avg;
+        //XYZ min_ad = min - avg;
+        //max += max_ad*5;
+        //min += min_ad*5;
         if (c1 != nullptr) {
             c1->prep();
             c2->prep();
@@ -1616,6 +1632,11 @@ public:
 
             target->max = bins.max;
             target->min = bins.min;
+
+            decimal d = XYZ::distance(target->max, target->min);
+            if (d < shortest) {
+                shortest = d;
+            }
 
             assertm(std::abs((int)(bins.p_geo->size() - bins.n_geo->size())) < geo->size(), "");
 
@@ -2104,24 +2125,24 @@ public:
         test_bvh->prep();
         cout << "done" << endl;
     }
-    void navBVH(BVH* bvh, CastResults& res, XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+    void navBVH(const BVH* bvh, CastResults& res,const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
             if (bvh->c1 != nullptr) {
                 decimal t1 = bvh->c1->intersection(position, slope, inv_slope);
                 decimal t2 = bvh->c2->intersection(position, slope, inv_slope);
-                if (t1 < 0 && t2 < 0) {
+                if (t1 <= 0 && t2 <= 0) {
                     return;
                 }
-                if (t1 < 0) {
+                if (t1 <= 0) {
                     navBVH(bvh->c2, res, position, slope, inv_slope);
                     return;
                 }
-                if (t2 < 0) {
+                if (t2 <= 0) {
                     navBVH(bvh->c1, res, position, slope, inv_slope);
                     return;
                 }
-                navBVH(bvh->c2, res, position, slope, inv_slope);
-                navBVH(bvh->c1, res, position, slope, inv_slope);
-                return;
+                //navBVH(bvh->c1, res, position, slope, inv_slope);
+                //navBVH(bvh->c2, res, position, slope, inv_slope);
+                //return;
                 if (t1 < t2) {
                     navBVH(bvh->c1, res, position, slope, inv_slope);
                     if (t2<res.distance) {
@@ -2223,6 +2244,10 @@ public:
             (*ray_data.output) += ray_data.coefficient * XYZ(0, 0, 0);
         }
         else {
+            if (DEPTH_VIEW) {
+                (*ray_data.output) += XYZ(1,1,1)*(ray_data.position.Z-1.8)*14;
+                return;
+            }
             if (!ray_data.check_lighting) {
                 (*ray_data.output) += ray_data.coefficient * results.material->calculate_emissions();
             }
@@ -2869,8 +2894,8 @@ SceneManager* load_default_scene() {
 
     Scene* scene = new Scene();
 
-    Lens* lens = new RectLens(1, 0.5625);
-    Camera* camera = new Camera(scene, XYZ(0, 0.2, -10), lens , XYZ(0,0,-10));
+    Lens* lens = new RectLens(0.5, 0.5625/2);
+    Camera* camera = new Camera(scene, XYZ(0, 0.9, -2), lens , XYZ(0,0,-15));
 
 
     vector<Sphere*> spheres;
@@ -2935,11 +2960,11 @@ SceneManager* load_default_scene() {
     mesh_mat->color = XYZ(1, 0.2, 0.2);
     mesh_mat->roughness = 0.2;
     mesh_mat->specular = 0.5;
-    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\Documents\\headlow.obj", mesh_mat);
+    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\Documents\\GEEZNUTS.obj", mesh_mat);
     //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\fumo.obj",mesh_mat);
     Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
     m_obj->addMesh(mesh);
-    m_obj->applyTransformXYZ(0, 0, 0);
+    m_obj->applyTransformXYZ(0, 0, 2);
     m_obj->rotateX(0);
     m_obj->rotateY(0);
     m_obj->rotateZ(0);
