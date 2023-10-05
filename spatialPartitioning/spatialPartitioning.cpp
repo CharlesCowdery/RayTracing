@@ -36,12 +36,11 @@
 #define kEpsilon 0.000000001
 
 #define FULL_BRIGHT false
-#define DEPTH_VIEW false
+#define DEPTH_VIEW true
 
-#define OBJECT_CULLING true
-#define CULL_RECEDING_OBJECTS true
-#define LAZY_OBJECT_CHECKING true
 //defines program precision
+#define LEAF_SIZE 4
+
 #define decimal float
 
 using namespace std;
@@ -353,7 +352,13 @@ public:
             std::floor(point.Z)
         );
     }
-    static XYZ min(XYZ point, decimal value) {
+    static decimal maxComponent(const XYZ& point) {
+        return std::max(point.X, std::max(point.Y, point.Z));
+    }
+    static decimal minComponent(const XYZ& point) {
+        return std::min(point.X, std::min(point.Y, point.Z));
+    }
+    static XYZ min(const XYZ& point, decimal value) {
         return XYZ(
             (point.X < value) ? point.X : value,
             (point.Y < value) ? point.Y : value,
@@ -364,21 +369,21 @@ public:
     static XYZ min(decimal value, XYZ point) {
         return XYZ::min(point, value);
     }
-    static XYZ min(XYZ point, XYZ other) {
+    static XYZ min(const XYZ& point, const XYZ& other) {
         return XYZ(
             (point.X < other.X) ? point.X : other.X,
             (point.Y < other.Y) ? point.Y : other.Y,
             (point.Z < other.Z) ? point.Z : other.Z
         );
     }
-    static XYZ max(XYZ point, XYZ other) {
+    static XYZ max(const XYZ& point, const XYZ& other) {
         return XYZ(
             (point.X > other.X) ? point.X : other.X,
             (point.Y > other.Y) ? point.Y : other.Y,
             (point.Z > other.Z) ? point.Z : other.Z
         );
     }
-    static XYZ max(XYZ point, decimal value) {
+    static XYZ max(const XYZ& point,const decimal& value) {
         return XYZ(
             (point.X > value) ? point.X : value,
             (point.Y > value) ? point.Y : value,
@@ -1082,6 +1087,7 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1p3;
     XYZ p1p2;
     Material* material;
+    PackagedTri() {}
     PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material* _material) {
         p1 = p1o + origin;
         XYZ _p2 = p2o + origin;
@@ -1094,6 +1100,14 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
         p1p3 = _p3 - p1;
         p1p2 = _p2 - p1;
         normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
+    }
+    static bool equals(const PackagedTri& t1, const PackagedTri& t2) {
+        bool test1 = XYZ::equals(t1.p1,t2.p1);
+        bool test2 = XYZ::equals(t1.normal, t2.normal);
+        bool test3 = XYZ::equals(t1.p1p3, t2.p1p3);
+        bool test4 = XYZ::equals(t1.p1p2, t2.p1p2);
+        bool test5 = t1.material == t2.material;
+        return test1 && test2 && test3 && test4 && test5;
     }
 };
 
@@ -1538,7 +1552,8 @@ private:
 };
 
 //http://bannalia.blogspot.com/2015/06/cache-friendly-binary-search.html
-int total = 0;
+int tree_total = 0;
+int leaf_total = 0;
 decimal shortest = 99;
 
 class BVH {
@@ -1549,17 +1564,18 @@ public:
     vector<PackagedTri> packedEl;
     BVH* c1 = nullptr;
     BVH* c2 = nullptr;
-    BVH() {}
+    BVH* parent;
+    BVH() {    }
     BVH(vector<Tri*>* T_vec) {
         elements = new vector<Tri*>(*T_vec);
-        total += T_vec->size();
+        leaf_total += T_vec->size();
         for (Tri* T_ptr : *T_vec) {
             max = XYZ::max(max, T_ptr->AABB_max);
             min = XYZ::min(min, T_ptr->AABB_min);
         }
         
     }
-    decimal intersection(const XYZ& origin, const XYZ& slope, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
+    static decimal intersection(const XYZ& max, const XYZ& min, const XYZ& origin, const XYZ& inv_slope) {
         decimal tx1 = (min.X - origin.X) * inv_slope.X;
         decimal tx2 = (max.X - origin.X) * inv_slope.X;
 
@@ -1589,6 +1605,29 @@ public:
         else {
             return -1;
         }
+    }
+    static decimal intersection_alt(const XYZ& max, const XYZ& min, const XYZ& origin, const XYZ& inv_slope) {
+        XYZ t0 = (min - origin) * inv_slope;
+        XYZ t1 = (max - origin) * inv_slope;
+        XYZ tmin = XYZ::min(t0, t1);
+        XYZ tmax = XYZ::max(t0, t1);
+        decimal max_t = XYZ::minComponent(tmax);
+        decimal min_t = XYZ::maxComponent(tmin);
+
+        if (max_t >= min_t) { //introduces a branch, but itll probably be fine. Lets me order search checks by nearest intersection
+            if (min_t >= 0) {
+                return min_t;
+            }
+            else {
+                return max_t;
+            }
+        }
+        else {
+            return -1;
+        }
+    }
+    decimal intersection(const XYZ& origin, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
+        return BVH::intersection_alt(max, min, origin, inv_slope);
     }
     void prep() {
         //XYZ avg = (max + min) / 2;
@@ -1646,25 +1685,33 @@ public:
                 cout << target->max << " " << target->min << endl;
             }
 
-            if (bins.p_geo->size() <= 4) {
+            if (bins.p_geo->size() <= LEAF_SIZE) {
                 assertm(bins.p_geo->size() > 0, "attempted bin creation of zero elements");
                 target->c1 = new BVH(bins.p_geo);
+                target->c1->parent = target;
+                tree_total++;
             }
             else {
                 BVH* leaf = new BVH();
                 target->c1 = leaf;
+                target->c1->parent = target;
                 WorkPacket k = WorkPacket(leaf, bins.p_geo);
                 packets.push(k);
+                tree_total++;
             }
-            if (bins.n_geo->size() <= 4) {
+            if (bins.n_geo->size() <= LEAF_SIZE) {
                 assertm(bins.n_geo->size() > 0, "attempted bin creation of zero elements");
                 target->c2 = new BVH(bins.n_geo);
+                target->c2->parent = target;
+                tree_total++;
             }
             else {
                 BVH* leaf = new BVH();
                 target->c2 = leaf;
+                target->c2->parent = target;
                 WorkPacket k = WorkPacket(leaf, bins.n_geo);
                 packets.push(k);
+                tree_total++;
             }
             delete geo;
             packets.pop();
@@ -1695,7 +1742,18 @@ public:
             }
         }
     }
-    
+    int size() {
+        int s = 0;
+        size(s);
+        return s;
+    }
+    void size(int& s) {
+        s++;
+        if (c1 != nullptr) {
+            c1->size(s);
+            c2->size(s);
+        }
+    }
 private:
     struct BinResults {
         vector<Tri*>* p_geo;
@@ -1798,6 +1856,11 @@ private:
         to_test.push_back(new Split(median, 0));
         to_test.push_back(new Split(median, 1));
         to_test.push_back(new Split(median, 2));
+        //for (const Tri* T_ptr : *geo) {
+        //    to_test.push_back(new Split(T_ptr->midpoint, 0));
+        //    to_test.push_back(new Split(T_ptr->midpoint, 1));
+        //    to_test.push_back(new Split(T_ptr->midpoint, 2));
+        //}
 
         Split* final = evaluate(geo, to_test);
         return final;
@@ -1876,17 +1939,84 @@ private:
     
 };
 
-class PackagedBVH { //less compact but more memory access optimized variant of the BVH class. Used once the tree is finalized.
-    XYZ c1Max;
-    XYZ c1Min;
+class PackagedBVH { //memory optimized. produced once the BVH tree is finalized
+public:
     int c1_index;
-    XYZ c2Max;
-    XYZ c2Min;
-    int c2_index;
     XYZ sMax;
     XYZ sMin;
-    int s_index;
-    vector<PackagedTri> elements;
+    char leaf_size;
+    PackagedTri elements[LEAF_SIZE];
+    PackagedBVH(BVH* target) {
+        sMax = target->max;
+        sMin = target->min;
+        c1_index = -1;
+    }
+    static vector<PackagedBVH>* collapse(BVH* top) {
+        vector<PackagedBVH>* out = new vector<PackagedBVH>(); 
+        int tree_size = top->size();
+        out->reserve(tree_size);
+        PackagedBVH::collapse(out, top);
+        return out;
+    }
+    static bool validate(vector<PackagedBVH>* vec, int index, BVH* BVH_ptr, int& leaf_count_f, int& leaf_count_r) {
+        PackagedBVH PBVH = vec->at(index);
+        bool t1 = PBVH.sMax == BVH_ptr->max;
+        bool t2 = PBVH.sMin == BVH_ptr->min;
+        bool t3 = PBVH.leaf_size == BVH_ptr->packedEl.size();
+        bool t4 = (PBVH.c1_index == -1) == (BVH_ptr->c1 == nullptr);
+        bool t6 = true;
+        bool t7 = true;
+        bool t8 = true;
+        if (PBVH.leaf_size > 0) {
+            leaf_count_f++;
+        }
+        if (BVH_ptr->packedEl.size() > 0) {
+            leaf_count_r++;
+        }
+        for (int i = 0; i < PBVH.leaf_size;i++) {
+            t8 = t8 && PackagedTri::equals(PBVH.elements[i], BVH_ptr->packedEl.at(i));
+        }
+        if (t4 && (BVH_ptr->c1 != nullptr)) {
+            t6 = PackagedBVH::validate(vec, PBVH.c1_index, BVH_ptr->c1,leaf_count_f,leaf_count_r);
+        }
+        bool valid = t1&&t2&&t3&&t4&&t6&&t7&&t8;
+        if (!valid) {
+            cout << "tree invalid" << endl;
+        }
+        return valid;
+    }
+private:
+    static void collapse(vector<PackagedBVH>* vec, BVH* top) {
+        vector<pair<BVH*,int>> current;
+        vector<pair<BVH*,int>> next;
+        int accumulated_index = 0;
+        current.push_back(pair<BVH*, int>(top, -1));
+        while (current.size() > 0) {
+            for (int i = 0; i < current.size(); i++) {
+                auto selection = current.at(i);
+                BVH* target = selection.first;
+                int parent_index = selection.second;
+                auto PBVH = PackagedBVH(target);
+                PBVH.leaf_size = target->packedEl.size();
+                for (int i = 0; i < PBVH.leaf_size; i++) {
+                    PBVH.elements[i] = target->packedEl[i];
+                }
+                vec->push_back(PBVH);
+                if (parent_index != -1) {
+                    if (vec->at(parent_index).c1_index == -1) {
+                        vec->at(parent_index).c1_index = accumulated_index;
+                    }
+                }
+                if (target->c1 != nullptr) {
+                    next.push_back(pair<BVH*, int>(target->c1, accumulated_index));
+                    next.push_back(pair<BVH*, int>(target->c2, accumulated_index));
+                }
+                accumulated_index++;
+            }
+            current = next;
+            next.clear();
+        }
+    }
 };
 
 struct PackagedRay {
@@ -2092,6 +2222,7 @@ public:
     vector<PointLikeLight> lights;
 
     BVH* test_bvh = new BVH();
+    vector<PackagedBVH>* flat_bvh;
 
     RayEngine() {}
     void prep() {
@@ -2123,51 +2254,109 @@ public:
         cout << "constructing BVH....." << flush;
         test_bvh->construct(new vector<Tri*>(tris));
         test_bvh->prep();
+        flat_bvh = PackagedBVH::collapse(test_bvh);
+        int lcf = 0;
+        int lcr = 0;
+        PackagedBVH::validate(flat_bvh, 0, test_bvh,lcf,lcr);
+        cout << lcf << " " << lcr << endl;
         cout << "done" << endl;
     }
-    void navBVH(const BVH* bvh, CastResults& res,const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
-            if (bvh->c1 != nullptr) {
-                decimal t1 = bvh->c1->intersection(position, slope, inv_slope);
-                decimal t2 = bvh->c2->intersection(position, slope, inv_slope);
-                if (t1 <= 0 && t2 <= 0) {
-                    return;
+    void navRawBVH(const BVH* bvh, CastResults& res,const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+        if (bvh->c1 != nullptr) {
+            decimal t1 = BVH::intersection(bvh->c1->max,bvh->c1->min,position, inv_slope);
+            decimal t2 = BVH::intersection(bvh->c2->max,bvh->c2->min,position, inv_slope);
+            if (t1 <= 0 && t2 <= 0) {
+                return;
+            }
+            if (t1 <= 0) {
+                navRawBVH(bvh->c2, res, position, slope, inv_slope);
+                return;
+            }
+            if (t2 <= 0) {
+                navRawBVH(bvh->c1, res, position, slope, inv_slope);
+                return;
+            }
+            //navRawBVH(bvh->c1, res, position, slope, inv_slope);
+            //navRawBVH(bvh->c2, res, position, slope, inv_slope);
+            //return;
+            if (t1 < t2) {
+                navRawBVH(bvh->c1, res, position, slope, inv_slope);
+                if (t2<res.distance) {
+                    navRawBVH(bvh->c2, res, position, slope, inv_slope);
                 }
-                if (t1 <= 0) {
-                    navBVH(bvh->c2, res, position, slope, inv_slope);
-                    return;
-                }
-                if (t2 <= 0) {
-                    navBVH(bvh->c1, res, position, slope, inv_slope);
-                    return;
-                }
-                //navBVH(bvh->c1, res, position, slope, inv_slope);
-                //navBVH(bvh->c2, res, position, slope, inv_slope);
-                //return;
-                if (t1 < t2) {
-                    navBVH(bvh->c1, res, position, slope, inv_slope);
-                    if (t2<res.distance) {
-                        navBVH(bvh->c2, res, position, slope, inv_slope);
-                    }
-                }
-                else {
-                    navBVH(bvh->c2, res, position, slope, inv_slope);
-                    if (t1<res.distance) {
-                        navBVH(bvh->c1, res, position, slope, inv_slope);
-                    }
-                } 
             }
             else {
-                for (const PackagedTri& t : bvh->packedEl) {
-                    decimal distance = Tri::intersection_check(t, position, slope);
-                    if (distance >= 0) {
-                        if (distance < res.distance) {
-                            res.distance = distance;
-                            res.normal = Tri::get_normal(t.normal, position);
-                            res.material = t.material;
-                        }
+                navRawBVH(bvh->c2, res, position, slope, inv_slope);
+                if (t1<res.distance) {
+                    navRawBVH(bvh->c1, res, position, slope, inv_slope);
+                }
+            } 
+        }
+        else {
+            for (const PackagedTri& t : bvh->packedEl) {
+                decimal distance = Tri::intersection_check(t, position, slope);
+                if (distance >= 0) {
+                    if (distance < res.distance) {
+                        res.distance = distance;
+                        res.normal = Tri::get_normal(t.normal, position);
+                        res.material = t.material;
                     }
                 }
             }
+        }
+    }
+    void navFlatBVH(const PackagedBVH& current, CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+        if (current.c1_index!=-1) {
+            const PackagedBVH& c1 = flat_bvh->at(current.c1_index);
+            const PackagedBVH& c2 = flat_bvh->at(current.c1_index+1);
+            decimal t1 = BVH::intersection(c1.sMax,c1.sMin,position, inv_slope);
+            decimal t2 = BVH::intersection(c2.sMax,c2.sMin,position, inv_slope);
+            if (t1 <= 0 && t2 <= 0) {
+                return;
+            }
+            if (t1 <= 0) {
+                navFlatBVH(c2, res, position, slope, inv_slope);
+                return;
+            }
+            if (t2 <= 0) {
+                navFlatBVH(c1, res, position, slope, inv_slope);
+                return;
+            }
+            //navFlatBVH(c1, res, position, slope, inv_slope);
+            //navFlatBVH(c2, res, position, slope, inv_slope);
+            //return;
+            if (t1 < t2) {
+                navFlatBVH(c1, res, position, slope, inv_slope);
+                if (t2 < res.distance) {
+                    navFlatBVH(c2, res, position, slope, inv_slope);
+                }
+            }
+            else {
+                navFlatBVH(c2, res, position, slope, inv_slope);
+                if (t1 < res.distance) {
+                    navFlatBVH(c1, res, position, slope, inv_slope);
+                }
+            }
+        }
+        else {
+            for(int i = 0; i < current.leaf_size; i++){
+                const PackagedTri& t = current.elements[i];
+                decimal distance = Tri::intersection_check(t, position, slope);
+                if (distance >= 0) {
+                    if (distance < res.distance) {
+                        res.distance = distance;
+                        res.normal = Tri::get_normal(t.normal, position);
+                        res.material = t.material;
+                    }
+                }
+            }
+        }
+    }
+    void navBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+        const PackagedBVH& top = (*flat_bvh)[0];
+        navFlatBVH(top,res, position, slope, inv_slope);
+        //navRawBVH(test_bvh, res, position, slope, inv_slope);
+
     }
     CastResults execute_bvh_cast(XYZ& position, const XYZ& slope) {
         CastResults returner;
@@ -2192,7 +2381,7 @@ public:
             }
         }
         XYZ inv_slope = XYZ(1) / slope;
-        navBVH(test_bvh, returner, position, slope, inv_slope);
+        navBVH(returner, position, slope, inv_slope);
         position += returner.distance * slope;
         return returner;
     }
@@ -2637,7 +2826,7 @@ private:
         int max_bounces = 2;
         int monte_bounce_count = 0;
         int diffuse_emit_count = 256;
-        int lighting_emit_count = 2;
+        int lighting_emit_count = 32;
 
         const int block_size = 16;
 
@@ -2894,8 +3083,8 @@ SceneManager* load_default_scene() {
 
     Scene* scene = new Scene();
 
-    Lens* lens = new RectLens(0.5, 0.5625/2);
-    Camera* camera = new Camera(scene, XYZ(0, 0.9, -2), lens , XYZ(0,0,-15));
+    Lens* lens = new RectLens(1, 1);
+    Camera* camera = new Camera(scene, XYZ(0, 0.2, -2), lens , XYZ(0,0,-3));
 
 
     vector<Sphere*> spheres;
@@ -2960,7 +3149,7 @@ SceneManager* load_default_scene() {
     mesh_mat->color = XYZ(1, 0.2, 0.2);
     mesh_mat->roughness = 0.2;
     mesh_mat->specular = 0.5;
-    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\Documents\\GEEZNUTS.obj", mesh_mat);
+    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\Documents\\headlow.obj", mesh_mat);
     //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\fumo.obj",mesh_mat);
     Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
     m_obj->addMesh(mesh);
@@ -3079,7 +3268,7 @@ int main()
     
     //GUI->hold_window();
     SceneManager* scene_manager = load_default_scene();
-    scene_manager->render(1920/2,1080/2,1);
+    scene_manager->render(640,640,1);
     /*auto l = scene_manager->RE.test_bvh->flatten(-1);
     cout << l.first->size() << endl;
     string out_s = "join(";
