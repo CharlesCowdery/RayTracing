@@ -31,7 +31,7 @@
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define MAX(a,b) ((a)>(b)?(a):(b))
 
-#define PI 3.1415
+#define PI 3.14159265358979323846264
 
 #define kEpsilon 0.000000001
 
@@ -1613,7 +1613,7 @@ public:
         XYZ tmax = XYZ::max(t0, t1);
         decimal max_t = XYZ::minComponent(tmax);
         decimal min_t = XYZ::maxComponent(tmin);
-
+        
         if (max_t >= min_t) { //introduces a branch, but itll probably be fine. Lets me order search checks by nearest intersection
             if (min_t >= 0) {
                 return min_t;
@@ -1627,7 +1627,7 @@ public:
         }
     }
     decimal intersection(const XYZ& origin, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
-        return BVH::intersection_alt(max, min, origin, inv_slope);
+        return BVH::intersection(max, min, origin, inv_slope);
     }
     void prep() {
         //XYZ avg = (max + min) / 2;
@@ -1853,14 +1853,14 @@ private:
         //to_test.push_back(new Split(average_point, 0));
         //to_test.push_back(new Split(average_point, 1));
         //to_test.push_back(new Split(average_point, 2));
-        to_test.push_back(new Split(median, 0));
-        to_test.push_back(new Split(median, 1));
-        to_test.push_back(new Split(median, 2));
-        //for (const Tri* T_ptr : *geo) {
-        //    to_test.push_back(new Split(T_ptr->midpoint, 0));
-        //    to_test.push_back(new Split(T_ptr->midpoint, 1));
-        //    to_test.push_back(new Split(T_ptr->midpoint, 2));
-        //}
+        //to_test.push_back(new Split(median, 0));
+        //to_test.push_back(new Split(median, 1));
+        //to_test.push_back(new Split(median, 2));
+        for (const Tri* T_ptr : *geo) {
+            to_test.push_back(new Split(T_ptr->midpoint, 0));
+            to_test.push_back(new Split(T_ptr->midpoint, 1));
+            to_test.push_back(new Split(T_ptr->midpoint, 2));
+        }
 
         Split* final = evaluate(geo, to_test);
         return final;
@@ -1944,6 +1944,8 @@ public:
     int c1_index;
     XYZ sMax;
     XYZ sMin;
+    XYZ bMax;
+    XYZ bMin;
     char leaf_size;
     PackagedTri elements[LEAF_SIZE];
     PackagedBVH(BVH* target) {
@@ -1957,33 +1959,6 @@ public:
         out->reserve(tree_size);
         PackagedBVH::collapse(out, top);
         return out;
-    }
-    static bool validate(vector<PackagedBVH>* vec, int index, BVH* BVH_ptr, int& leaf_count_f, int& leaf_count_r) {
-        PackagedBVH PBVH = vec->at(index);
-        bool t1 = PBVH.sMax == BVH_ptr->max;
-        bool t2 = PBVH.sMin == BVH_ptr->min;
-        bool t3 = PBVH.leaf_size == BVH_ptr->packedEl.size();
-        bool t4 = (PBVH.c1_index == -1) == (BVH_ptr->c1 == nullptr);
-        bool t6 = true;
-        bool t7 = true;
-        bool t8 = true;
-        if (PBVH.leaf_size > 0) {
-            leaf_count_f++;
-        }
-        if (BVH_ptr->packedEl.size() > 0) {
-            leaf_count_r++;
-        }
-        for (int i = 0; i < PBVH.leaf_size;i++) {
-            t8 = t8 && PackagedTri::equals(PBVH.elements[i], BVH_ptr->packedEl.at(i));
-        }
-        if (t4 && (BVH_ptr->c1 != nullptr)) {
-            t6 = PackagedBVH::validate(vec, PBVH.c1_index, BVH_ptr->c1,leaf_count_f,leaf_count_r);
-        }
-        bool valid = t1&&t2&&t3&&t4&&t6&&t7&&t8;
-        if (!valid) {
-            cout << "tree invalid" << endl;
-        }
-        return valid;
     }
 private:
     static void collapse(vector<PackagedBVH>* vec, BVH* top) {
@@ -2257,7 +2232,6 @@ public:
         flat_bvh = PackagedBVH::collapse(test_bvh);
         int lcf = 0;
         int lcr = 0;
-        PackagedBVH::validate(flat_bvh, 0, test_bvh,lcf,lcr);
         cout << lcf << " " << lcr << endl;
         cout << "done" << endl;
     }
@@ -2268,11 +2242,11 @@ public:
             if (t1 <= 0 && t2 <= 0) {
                 return;
             }
-            if (t1 <= 0) {
+            if (t1 < 0) {
                 navRawBVH(bvh->c2, res, position, slope, inv_slope);
                 return;
             }
-            if (t2 <= 0) {
+            if (t2 < 0) {
                 navRawBVH(bvh->c1, res, position, slope, inv_slope);
                 return;
             }
@@ -2305,6 +2279,37 @@ public:
             }
         }
     }
+    void iterativeBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+        int stack[64];
+        int stack_index = 0;
+        stack[0] = 0;
+        while (stack_index >= 0) {
+            const PackagedBVH& current = flat_bvh->at(stack[stack_index]);
+            stack_index--;
+            if (BVH::intersection(current.sMax, current.sMin, position, inv_slope) <= 0) {
+                continue;
+            }
+            if (current.c1_index != -1) {
+                int c1_index = current.c1_index;
+                int c2_index = c1_index + 1;
+                stack_index++;
+                stack[stack_index] = c1_index;
+                stack_index++;
+                stack[stack_index] = c2_index;
+            }
+            else {
+                for (int i = 0; i < current.leaf_size; i++) {
+                    const PackagedTri& t = current.elements[i];
+                    decimal distance = Tri::intersection_check(t, position, slope);
+                    if (distance >= 0 && distance < res.distance) {
+                        res.distance = distance;
+                        res.normal = Tri::get_normal(t.normal, position);
+                        res.material = t.material;
+                    }
+                }
+            }
+        }
+    }
     void navFlatBVH(const PackagedBVH& current, CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
         if (current.c1_index!=-1) {
             const PackagedBVH& c1 = flat_bvh->at(current.c1_index);
@@ -2322,10 +2327,10 @@ public:
                 navFlatBVH(c1, res, position, slope, inv_slope);
                 return;
             }
-            //navFlatBVH(c1, res, position, slope, inv_slope);
-            //navFlatBVH(c2, res, position, slope, inv_slope);
-            //return;
-            if (t1 < t2) {
+            navFlatBVH(c1, res, position, slope, inv_slope);
+            navFlatBVH(c2, res, position, slope, inv_slope);
+            return;
+            if (t1<t2) {
                 navFlatBVH(c1, res, position, slope, inv_slope);
                 if (t2 < res.distance) {
                     navFlatBVH(c2, res, position, slope, inv_slope);
@@ -2354,7 +2359,8 @@ public:
     }
     void navBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
         const PackagedBVH& top = (*flat_bvh)[0];
-        navFlatBVH(top,res, position, slope, inv_slope);
+        //navFlatBVHI(0, res, position, slope, inv_slope);
+        iterativeBVH(res, position, slope, inv_slope);
         //navRawBVH(test_bvh, res, position, slope, inv_slope);
 
     }
@@ -2434,7 +2440,7 @@ public:
         }
         else {
             if (DEPTH_VIEW) {
-                (*ray_data.output) += XYZ(1,1,1)*(ray_data.position.Z-1.8)*14;
+                (*ray_data.output) += XYZ(1,1,1)*(4-ray_data.position.Z)*5;
                 return;
             }
             if (!ray_data.check_lighting) {
@@ -2986,11 +2992,11 @@ public:
         }
         return data;
     }
-    static Mesh* loadMeshFile(string fName, Material* mat) {
+    static Mesh* loadObjFile(string fName, Material* mat) {
         ifstream file(fName, ios::in);
-        return loadMesh(file, mat);
+        return loadObj(file, mat);
     }
-    static Mesh* loadMesh(ifstream& file, Material* mat) {
+    static Mesh* loadObj(ifstream& file, Material* mat) {
         Mesh* mesh = new Mesh();
         vector<XYZ> verts;
         for (std::string line; getline(file, line);){
@@ -3019,6 +3025,36 @@ public:
                 int i2 = stoi(words[3])-1;
                 Tri f = Tri(verts[i0], verts[i1], verts[i2], mat);
                 mesh->addTri(f);
+            }
+        }
+        return mesh;
+    }
+    static Mesh* loadTriFile(string fName, Material* mat) {
+        ifstream file(fName, ios::in);
+        return loadTri(file, mat);
+    }
+    static Mesh* loadTri(ifstream& file, Material* mat) {
+        Mesh* mesh = new Mesh();
+        vector<XYZ> verts;
+        for (std::string line; getline(file, line);) {
+            vector<string> words = split_string(line, ' ');
+            if (words.size()>1) {
+                double v1_x = stod(words[0]);
+                double v1_y = stod(words[1]);
+                double v1_z = stod(words[2]);
+                double v2_x = stod(words[3]);
+                double v2_y = stod(words[4]);
+                double v2_z = stod(words[5]);
+                double v3_x = stod(words[6]);
+                double v3_y = stod(words[7]);
+                double v3_z = stod(words[8]);
+                Tri f1 = Tri(
+                    XYZ(v1_x, v1_y, v1_z),
+                    XYZ(v2_x, v2_y, v2_z),
+                    XYZ(v3_x, v3_y, v3_z),
+                    mat);
+                mesh->addTri(f1);
+                //cout << verts.back() << endl;
             }
         }
         return mesh;
@@ -3084,7 +3120,7 @@ SceneManager* load_default_scene() {
     Scene* scene = new Scene();
 
     Lens* lens = new RectLens(1, 1);
-    Camera* camera = new Camera(scene, XYZ(0, 0.2, -2), lens , XYZ(0,0,-3));
+    Camera* camera = new Camera(scene, XYZ(0, 0.2, -2), lens , XYZ(0,0,-2));
 
 
     vector<Sphere*> spheres;
@@ -3149,13 +3185,14 @@ SceneManager* load_default_scene() {
     mesh_mat->color = XYZ(1, 0.2, 0.2);
     mesh_mat->roughness = 0.2;
     mesh_mat->specular = 0.5;
-    Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\Documents\\headlow.obj", mesh_mat);
-    //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\fumo.obj",mesh_mat);
+    Mesh* mesh = FileManager::loadTriFile("C:\\Users\\Charlie\\Documents\\RobotLab.tri", mesh_mat);
+    //Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\headmedium.obj", mesh_mat);
+    //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\lowfumo.obj",mesh_mat);
     Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
     m_obj->addMesh(mesh);
-    m_obj->applyTransformXYZ(0, 0, 2);
+    m_obj->applyTransformXYZ(1, 0, 2);
     m_obj->rotateX(0);
-    m_obj->rotateY(0);
+    m_obj->rotateY(PI / 4);
     m_obj->rotateZ(0);
 
     //scene->register_sphere(my_sphere);
