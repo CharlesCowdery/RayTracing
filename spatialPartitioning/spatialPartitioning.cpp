@@ -280,6 +280,11 @@ public:
     XYZ clone() {
         return XYZ(X, Y, Z);
     }
+    decimal operator[](const int n) const {
+        if (n == 0) return X;
+        if (n == 1) return Y;
+        if (n == 2) return Z;
+    }
     void add(decimal addend) {
         X += addend;
         Y += addend;
@@ -908,28 +913,28 @@ public:
         diff_t = diff_c * diff_f;
         diff_spread = roughness * roughness*PI/2;
     }
-    decimal get_diffuse_factor() {
+    decimal get_diffuse_factor() const {
         return 1-min(max(metallic, specular), (decimal)1.0);
     }
-    decimal get_specular_factor() {
+    decimal get_specular_factor() const {
         return min(max(metallic,specular),(decimal)1.0);
     }
-    XYZ get_specular_color() {
+    XYZ get_specular_color() const {
         return XYZ::linear_mix(metallic, specular * XYZ(1, 1, 1), color);
     }
-    XYZ get_diffuse_color() {
+    XYZ get_diffuse_color() const {
         return color / PI;
     }
-    XYZ get_fresnel(XYZ light_slope,XYZ normal) {
+    XYZ get_fresnel(XYZ light_slope,XYZ normal) const {
         XYZ specular_color = get_specular_color();
         auto second_term = (1 - specular_color)*pow(1 - XYZ::dot(light_slope, normal), 5);
         return specular_color + second_term;
     }
-    XYZ fast_fresnel(decimal dot_NI) {
+    XYZ fast_fresnel(decimal dot_NI) const {
         decimal g = 1 - dot_NI;
         return I_spec * (g * g * g * g * g);
     }
-    decimal get_normal_distribution_beta(const XYZ& normal, const XYZ& half_vector){
+    decimal get_normal_distribution_beta(const XYZ& normal, const XYZ& half_vector) const {
         decimal a = roughness;
         decimal dot = XYZ::dot(normal, half_vector);
         decimal exponent = -(1 - pow(dot, 2)) / (pow(a*dot,2));
@@ -938,7 +943,7 @@ public:
 
         return final;
     }
-    decimal get_normal_distribution_GGXTR(const XYZ& normal, const XYZ& half_vector) {
+    decimal get_normal_distribution_GGXTR(const XYZ& normal, const XYZ& half_vector) const {
         decimal a = roughness;
         decimal dot = XYZ::dot(normal, half_vector);
         decimal final = (a * a)
@@ -947,12 +952,12 @@ public:
 
         return final;
     }
-    decimal fast_normal_dist(const decimal dot_NH) {
+    decimal fast_normal_dist(const decimal dot_NH) const {
         decimal a_2 = roughness * roughness;
         decimal g = dot_NH*dot_NH*(a_2-1)+1;
         return dot_NH*(a_2) / (PI * g*g);
     }
-    decimal geoSchlickGGX(const XYZ& normal, const XYZ& vector,  decimal k) {
+    decimal geoSchlickGGX(const XYZ& normal, const XYZ& vector,  decimal k) const {
 
         decimal dot = XYZ::dot(normal,vector);
 
@@ -960,10 +965,10 @@ public:
         //return 1;
 
     }
-    decimal fastGeo_both(const decimal dot_NO, const decimal dot_NI) {
+    decimal fastGeo_both(const decimal dot_NO, const decimal dot_NI) const {
         return dot_NO / (dot_NO * (1 - k) + k) * dot_NI / (dot_NI * (1 - k) + k);
     }
-    XYZ fast_BRDF_co(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) {
+    XYZ fast_BRDF_co(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
         decimal dot_NI = XYZ::dot(normal, input_slope);
         decimal dot_NO = XYZ::dot(normal, output_slope);
         if (dot_NI <= 0 || dot_NO <= 0) {
@@ -980,7 +985,7 @@ public:
         return (spec_f * (geo * normal_dist * fresnel) / divisor+diff_t)*dot_NI;
 
     }
-    XYZ calculate_BRDF_coefficient(XYZ normal, XYZ input_slope, XYZ output_slope) {
+    XYZ calculate_BRDF_coefficient(XYZ normal, XYZ input_slope, XYZ output_slope) const {
         
         if (XYZ::dot(normal, input_slope) <= 0 || XYZ::dot(normal, output_slope) <= 0) {
             return XYZ(0,0,0);
@@ -1002,10 +1007,10 @@ public:
         //return fresnel;//specular_output;
         return BRDF_color* XYZ::dot(normal, input_slope);//
     }
-    XYZ calculate_BRDF(XYZ normal, XYZ input_light, XYZ input_slope, XYZ output_slope) {
+    XYZ calculate_BRDF(XYZ normal, XYZ input_light, XYZ input_slope, XYZ output_slope) const {
         return calculate_BRDF_coefficient(normal, input_slope, output_slope);
     }
-    XYZ random_bounce(const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) {
+    XYZ random_bounce(const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) const {
         decimal prob = fRand(0, 1);
         if(prob<diff_f){
             return Matrix3x3::aligned_random(PI/2, diffuse_rotation);
@@ -1015,7 +1020,7 @@ public:
         }
 
     }
-    XYZ fast_bounce(const XYZ& normal, const XYZ& input_slope) {
+    XYZ fast_bounce(const XYZ& normal, const XYZ& input_slope) const {
         decimal prob = fRand(0, 1);
         if (prob < diff_f) {
             XYZ raw = XYZ::normalize(XYZ(fRand(-1, 1), fRand(-1, 1), fRand(-1, 1)));
@@ -1035,10 +1040,10 @@ public:
             return raw;
         }
     }
-    Material atUV(decimal x, decimal y) {
+    Material atUV(decimal x, decimal y) const {
 
     }
-    XYZ calculate_emissions() {
+    XYZ calculate_emissions() const {
         return emission * emissive_color;
     }
 };
@@ -1082,24 +1087,19 @@ class SpotLight {
 };
 
 struct PackagedTri { //reduced memory footprint to improve cache perf
-    XYZ p1;
-    XYZ normal;
-    XYZ p1p3;
-    XYZ p1p2;
-    Material* material;
+    const XYZ p1;
+    const XYZ normal;
+    const XYZ p1p3;
+    const XYZ p1p2;
+    const Material* material;
     PackagedTri() {}
     PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material* _material) {
-        p1 = p1o + origin;
         XYZ _p2 = p2o + origin;
         XYZ _p3 = p3o + origin;
         PackagedTri(p1, _p2, _p3, _material);
     }
-    PackagedTri(const XYZ _p1, const XYZ _p2, const XYZ _p3, Material* _material) {
-        material = _material;
-        p1 = _p1;
-        p1p3 = _p3 - p1;
-        p1p2 = _p2 - p1;
-        normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
+    PackagedTri(const XYZ _p1, const XYZ _p2, const XYZ _p3, Material* _material):
+        p1(_p1), p1p3(_p3 - p1), p1p2(_p2 - p1), normal(XYZ::normalize(XYZ::cross(p1p3, p1p2))), material(_material){
     }
     static bool equals(const PackagedTri& t1, const PackagedTri& t2) {
         bool test1 = XYZ::equals(t1.p1,t2.p1);
@@ -1657,7 +1657,6 @@ public:
         auto initial_packet = WorkPacket(this,initial_geo);
         packets.push(initial_packet);
         int i = 0;
-        bool max_size = true;
         while (packets.size() > 0) {
             i++;
             WorkPacket packet = packets.front();
@@ -1666,30 +1665,33 @@ public:
 
             assertm(geo->size() > 0, "zero size bin");
 
+            AABB my_bounds = getBounds(geo);
+
+            target->max = my_bounds.max;
+            target->min = my_bounds.min;
+
+            XYZ extent = target->max - target->min;
+            int axis = 0;
+            if (extent.Y > extent.X) axis = 1;
+            if (extent.Z > extent[axis]) axis = 2;
+            float splitPos = target->min[axis] + extent[axis] * 0.5f;
+
+            //Split* split = new Split(splitPos, axis);
+            //evaluate_split(geo, *split, 1);
             Split* split = probe(geo);
             auto bins = bin(split, geo);
 
-            target->max = bins.max;
-            target->min = bins.min;
-
-            decimal d = XYZ::distance(target->max, target->min);
-            if (d < shortest) {
-                shortest = d;
-            }
-
-            assertm(std::abs((int)(bins.p_geo->size() - bins.n_geo->size())) < geo->size(), "");
-
-
-            if (max_size) {
-                max_size = false;
-                cout << target->max << " " << target->min << endl;
+            if (((size_t)abs((int)(bins.p_geo->size() - bins.n_geo->size()))) == geo->size()) {
+                target->elements = new vector<Tri*>(*geo);
+                leaf_total += geo->size();
+                packets.pop();
+                continue;
             }
 
             if (bins.p_geo->size() <= LEAF_SIZE) {
                 assertm(bins.p_geo->size() > 0, "attempted bin creation of zero elements");
                 target->c1 = new BVH(bins.p_geo);
                 target->c1->parent = target;
-                tree_total++;
             }
             else {
                 BVH* leaf = new BVH();
@@ -1697,13 +1699,11 @@ public:
                 target->c1->parent = target;
                 WorkPacket k = WorkPacket(leaf, bins.p_geo);
                 packets.push(k);
-                tree_total++;
             }
             if (bins.n_geo->size() <= LEAF_SIZE) {
                 assertm(bins.n_geo->size() > 0, "attempted bin creation of zero elements");
                 target->c2 = new BVH(bins.n_geo);
                 target->c2->parent = target;
-                tree_total++;
             }
             else {
                 BVH* leaf = new BVH();
@@ -1711,8 +1711,8 @@ public:
                 target->c2->parent = target;
                 WorkPacket k = WorkPacket(leaf, bins.n_geo);
                 packets.push(k);
-                tree_total++;
             }
+
             delete geo;
             packets.pop();
         }
@@ -1754,12 +1754,22 @@ public:
             c2->size(s);
         }
     }
+    int count() {
+        int s = 0;
+        count(s);
+        return s;
+    }
+    void count(int& s) {
+        s+=this->packedEl.size();
+        if (c1 != nullptr) {
+            c1->size(s);
+            c2->size(s);
+        }
+    }
 private:
     struct BinResults {
         vector<Tri*>* p_geo;
         vector<Tri*>* n_geo;
-        XYZ max;
-        XYZ min;
     };
     struct Stats {
         XYZ min = XYZ(99999999999);
@@ -1780,50 +1790,41 @@ private:
         int facing;
         Split(XYZ place, int _facing):placement(place), facing(_facing) {};
     };
+    struct AABB {
+        XYZ max;
+        XYZ min;
+        AABB() : max(-99999999999999), min(99999999999999) {}
+        AABB(XYZ _max, XYZ _min) :max(_max), min(_min) {}
+        void expand(XYZ point) {
+            max = XYZ::max(max, point);
+            min = XYZ::min(min, point);
+        }
+    };
+    AABB getBounds( vector<Tri*>* geo) {
+        AABB results;
+        for (Tri* T_ptr : *geo) {
+            results.expand(T_ptr->AABB_max);
+            results.expand(T_ptr->AABB_min);
+        }
+        return results;
+    }
     BinResults bin(Split* split, vector<Tri*>* geo) {
         BinResults results;
         results.p_geo = new vector<Tri*>();
         results.n_geo = new vector<Tri*>();
-
-        switch (split->facing) {
-        case 0: //X
-            for (Tri* T_ptr : *geo) {
-                if (T_ptr->midpoint.X > split->placement.X) {
-                    results.p_geo->push_back(T_ptr);
-                }
-                if (T_ptr->midpoint.X <= split->placement.X) {
-                    results.n_geo->push_back(T_ptr);
-                }
-            }
-            break;
-        case 1: //Y
-            for (Tri* T_ptr : *geo) {
-                if (T_ptr->midpoint.Y > split->placement.Y) {
-                    results.p_geo->push_back(T_ptr);
-                }
-                if (T_ptr->midpoint.Y <= split->placement.Y) {
-                    results.n_geo->push_back(T_ptr);
-                }
-            }
-            break;
-        case 2: //Z
-            for (Tri* T_ptr : *geo) {
-                if (T_ptr->midpoint.Z > split->placement.Z) {
-                    results.p_geo->push_back(T_ptr);
-                }
-                if (T_ptr->midpoint.Z <= split->placement.Z) {
-                    results.n_geo->push_back(T_ptr);
-                }
-            }
-            break;
-        }
+        int axis = split->facing;
         for (Tri* T_ptr : *geo) {
-            results.max = XYZ::max(results.max, T_ptr->AABB_max);
-            results.min = XYZ::min(results.min, T_ptr->AABB_min);
+            if (T_ptr->midpoint[axis] > split->placement[axis]) {
+                results.p_geo->push_back(T_ptr);
+            } else {
+                results.n_geo->push_back(T_ptr);
+            }
         }
         return results;
     }
     Split* probe(vector<Tri*>* geo) {
+        
+
         XYZ total = XYZ();
         vector<decimal> x_vec;
         vector<decimal> y_vec;
@@ -1871,37 +1872,14 @@ private:
         stat.min = XYZ::min(point_min, stat.min);   
     }
     static void get_stats(vector<Tri*>* geo, Split& split) {
-        switch (split.facing) {
-        case 0: //X
-            for (const Tri* T_ptr : *geo) {
-                if (T_ptr->midpoint.X > split.placement.X) {
-                    operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
-                }
-                if (T_ptr->midpoint.X <= split.placement.X) {
-                    operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
-                }
+        int axis = split.facing;
+        for (const Tri* T_ptr : *geo) {
+            if (T_ptr->midpoint[axis] > split.placement[axis]) {
+                operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
             }
-            break;
-        case 1: //Y
-            for (const Tri* T_ptr : *geo) {
-                if (T_ptr->midpoint.Y > split.placement.Y) {
-                    operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
-                }
-                if (T_ptr->midpoint.Y <= split.placement.Y) {
-                    operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
-                }
+            if (T_ptr->midpoint[axis] <= split.placement[axis]) {
+                operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
             }
-            break;
-        case 2: //Z
-            for (const Tri* T_ptr : *geo) {
-                if (T_ptr->midpoint.Z > split.placement.Z) {
-                    operate_stats(split.p, T_ptr->AABB_max, T_ptr->AABB_min);
-                }
-                if (T_ptr->midpoint.Z <= split.placement.Z) {
-                    operate_stats(split.n, T_ptr->AABB_max, T_ptr->AABB_min);
-                }
-            }
-            break;
         }
     }
     static decimal evaluate_split(vector<Tri*>* geo, Split& split, decimal SA_parent) {
@@ -1913,9 +1891,6 @@ private:
         decimal Ha = Sa * split.p.count * intersect_cost;
         decimal Hb = Sb * split.n.count * intersect_cost;
         decimal final_h = traversal_cost + Ha + Hb;
-        if (split.p.count == 0 || split.n.count == 0) {
-            final_h = 99999999999;
-        }
         split.score = final_h;
         return final_h;
         //return (split.p.count+split.n.count)/geo->size()*(split.p.count+split.n.count);
@@ -1941,29 +1916,29 @@ private:
 
 class PackagedBVH { //memory optimized. produced once the BVH tree is finalized
 public:
-    int c1_index;
+    int32_t index;
     XYZ sMax;
     XYZ sMin;
-    XYZ bMax;
-    XYZ bMin;
-    char leaf_size;
-    PackagedTri elements[LEAF_SIZE];
+    int32_t leaf_size;
     PackagedBVH(BVH* target) {
         sMax = target->max;
         sMin = target->min;
-        c1_index = -1;
+        index = -1;
     }
-    static vector<PackagedBVH>* collapse(BVH* top) {
-        vector<PackagedBVH>* out = new vector<PackagedBVH>(); 
+    static pair<PackagedBVH*,vector<PackagedTri>*> collapse(BVH* top) {
+        vector<PackagedTri>* tri_vec = new vector<PackagedTri>();
+        int tri_count = top->count();
         int tree_size = top->size();
-        out->reserve(tree_size);
-        PackagedBVH::collapse(out, top);
-        return out;
+        PackagedBVH* out = (PackagedBVH*) _aligned_malloc((tree_size+1)*sizeof(PackagedBVH), 32);
+        tri_vec->reserve(tri_count+1);
+        PackagedBVH::collapse(out, tri_vec, top);
+        return pair<PackagedBVH*, vector<PackagedTri>*>(out,tri_vec);
     }
 private:
-    static void collapse(vector<PackagedBVH>* vec, BVH* top) {
+    static void collapse(PackagedBVH* vec, vector<PackagedTri>* tri_vec, BVH* top) {
         vector<pair<BVH*,int>> current;
         vector<pair<BVH*,int>> next;
+        
         int accumulated_index = 0;
         current.push_back(pair<BVH*, int>(top, -1));
         while (current.size() > 0) {
@@ -1973,19 +1948,24 @@ private:
                 int parent_index = selection.second;
                 auto PBVH = PackagedBVH(target);
                 PBVH.leaf_size = target->packedEl.size();
-                for (int i = 0; i < PBVH.leaf_size; i++) {
-                    PBVH.elements[i] = target->packedEl[i];
-                }
-                vec->push_back(PBVH);
-                if (parent_index != -1) {
-                    if (vec->at(parent_index).c1_index == -1) {
-                        vec->at(parent_index).c1_index = accumulated_index;
+                if (PBVH.leaf_size > 0) {
+                    PBVH.index = tri_vec->size();
+                    for (int i = 0; i < PBVH.leaf_size; i++) {
+                        tri_vec->push_back(target->packedEl[i]);
                     }
                 }
                 if (target->c1 != nullptr) {
                     next.push_back(pair<BVH*, int>(target->c1, accumulated_index));
                     next.push_back(pair<BVH*, int>(target->c2, accumulated_index));
                 }
+                vec[accumulated_index] = PBVH;
+                if (parent_index != -1) {
+                    if (vec[parent_index].index == -1) {
+                        vec[parent_index].index = accumulated_index;
+                    }
+
+                }
+                else accumulated_index++;
                 accumulated_index++;
             }
             current = next;
@@ -2104,7 +2084,7 @@ template <typename T, int max_size> struct DataBlock {
 
 struct CastResults {
     XYZ normal;
-    Material* material;
+    const Material* material;
     decimal distance;
     CastResults() : normal(XYZ()), material(nullptr), distance(999999999999999) {};
     CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat), distance(9999999999999) {}
@@ -2121,7 +2101,7 @@ struct Casting_Diagnostics {
 
 
 //#define RAY_BLOCK_SIZE 65536
-#define RAY_BLOCK_SIZE 16*4
+#define RAY_BLOCK_SIZE 2048
 typedef DataBlock<PackagedRay,RAY_BLOCK_SIZE> Ray_Block;
 
 struct Render_Pair {
@@ -2197,7 +2177,8 @@ public:
     vector<PointLikeLight> lights;
 
     BVH* test_bvh = new BVH();
-    vector<PackagedBVH>* flat_bvh;
+    PackagedBVH* flat_bvh;
+    vector<PackagedTri>* flat_bvh_tris;
 
     RayEngine() {}
     void prep() {
@@ -2229,7 +2210,9 @@ public:
         cout << "constructing BVH....." << flush;
         test_bvh->construct(new vector<Tri*>(tris));
         test_bvh->prep();
-        flat_bvh = PackagedBVH::collapse(test_bvh);
+        auto collapse_out = PackagedBVH::collapse(test_bvh);
+        flat_bvh = collapse_out.first;
+        flat_bvh_tris = collapse_out.second;
         int lcf = 0;
         int lcr = 0;
         cout << lcf << " " << lcr << endl;
@@ -2284,13 +2267,13 @@ public:
         int stack_index = 0;
         stack[0] = 0;
         while (stack_index >= 0) {
-            const PackagedBVH& current = flat_bvh->at(stack[stack_index]);
+            const PackagedBVH& current = flat_bvh[stack[stack_index]];
             stack_index--;
             if (BVH::intersection(current.sMax, current.sMin, position, inv_slope) <= 0) {
                 continue;
             }
-            if (current.c1_index != -1) {
-                int c1_index = current.c1_index;
+            if (current.leaf_size == 0) {
+                int c1_index = current.index;
                 int c2_index = c1_index + 1;
                 stack_index++;
                 stack[stack_index] = c1_index;
@@ -2299,18 +2282,18 @@ public:
             }
             else {
                 for (int i = 0; i < current.leaf_size; i++) {
-                    const PackagedTri& t = current.elements[i];
+                    const PackagedTri& t = (*flat_bvh_tris)[i+current.index];
                     decimal distance = Tri::intersection_check(t, position, slope);
-                    if (distance >= 0 && distance < res.distance) {
-                        res.distance = distance;
-                        res.normal = Tri::get_normal(t.normal, position);
-                        res.material = t.material;
+                    if (distance >= 0) {
+                        res.distance = min(res.distance,distance);
+                        //res.normal = Tri::get_normal(t.normal, position);
+                        //res.material = t.material;
                     }
                 }
             }
         }
     }
-    void navFlatBVH(const PackagedBVH& current, CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+    /*void navFlatBVH(const PackagedBVH& current, CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
         if (current.c1_index!=-1) {
             const PackagedBVH& c1 = flat_bvh->at(current.c1_index);
             const PackagedBVH& c2 = flat_bvh->at(current.c1_index+1);
@@ -2356,9 +2339,9 @@ public:
                 }
             }
         }
-    }
+    }*/
     void navBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
-        const PackagedBVH& top = (*flat_bvh)[0];
+        const PackagedBVH& top = flat_bvh[0];
         //navFlatBVHI(0, res, position, slope, inv_slope);
         iterativeBVH(res, position, slope, inv_slope);
         //navRawBVH(test_bvh, res, position, slope, inv_slope);
@@ -2366,26 +2349,26 @@ public:
     }
     CastResults execute_bvh_cast(XYZ& position, const XYZ& slope) {
         CastResults returner;
-        for (const PackagedSphere& s : sphere_data) {
-            decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
-            if (distance >= 0) {
-                if (distance < returner.distance) {
-                    returner.distance = distance;
-                    returner.normal = Sphere::normal(s.origin, position + distance * slope);
-                    returner.material = s.material;
-                }
-            }
-        }
-        for (const PackagedPlane& p : plane_data) {
-            decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
-            if (distance >= 0) {
-                if (distance < returner.distance) {
-                    returner.distance = distance;
-                    returner.normal = p.normal;
-                    returner.material = p.material;
-                }
-            }
-        }
+        //for (const PackagedSphere& s : sphere_data) {
+        //    decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
+        //    if (distance >= 0) {
+        //        if (distance < returner.distance) {
+        //            returner.distance = distance;
+        //            returner.normal = Sphere::normal(s.origin, position + distance * slope);
+        //            returner.material = s.material;
+        //        }
+        //    }
+        //}
+        //for (const PackagedPlane& p : plane_data) {
+        //    decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
+        //    if (distance >= 0) {
+        //        if (distance < returner.distance) {
+        //            returner.distance = distance;
+        //            returner.normal = p.normal;
+        //            returner.material = p.material;
+        //        }
+        //    }
+        //}
         XYZ inv_slope = XYZ(1) / slope;
         navBVH(returner, position, slope, inv_slope);
         position += returner.distance * slope;
@@ -2435,14 +2418,15 @@ public:
         stats.rays_processed++;
         XYZ start = ray_data.position;
         CastResults results = execute_ray_cast(ray_data.position, ray_data.slope);
+        if (DEPTH_VIEW) {
+            (*ray_data.output) += XYZ(1, 1, 1) * (4 - ray_data.position.Z) * 5;
+            return;
+        }
         if (results.material == nullptr) {
             (*ray_data.output) += ray_data.coefficient * XYZ(0, 0, 0);
         }
         else {
-            if (DEPTH_VIEW) {
-                (*ray_data.output) += XYZ(1,1,1)*(4-ray_data.position.Z)*5;
-                return;
-            }
+            
             if (!ray_data.check_lighting) {
                 (*ray_data.output) += ray_data.coefficient * results.material->calculate_emissions();
             }
@@ -2878,12 +2862,12 @@ private:
         while (BM.size()>1) { //this returns true if theres still rays to be processed
             process_block(rays_cast,verbose);
             blocks_processed++;
-            auto time = chrono::high_resolution_clock::now();
-            if (chrono::duration_cast<chrono::milliseconds>(time - frame_time).count() > 16) {
-                GUI.commit_canvas();
-                GUI.handle_events();
-                frame_time = time;
-            }
+            //auto time = chrono::high_resolution_clock::now();
+            //if (chrono::duration_cast<chrono::milliseconds>(time - frame_time).count() > 16) {
+            //    GUI.commit_canvas();
+            //    GUI.handle_events();
+            //    frame_time = time;
+            //}
         }
         refresh_canvas();
         cout << endl;
@@ -2905,12 +2889,12 @@ private:
     }
     void process_block(long long& rays_cast, bool verbose) {
         Ray_Block* block = BM.next();
-        fire_casting_event(block, rays_cast, verbose);
-        iXY::set* changes = BM.changed_pixels();
-        for (iXY change : *changes) {
-            XYZ color = ImageHandler::post_process_pixel(*raw_output[change.Y][change.X],1,1);
-            GUI.commit_pixel(color,change.X, change.Y);
-        }
+        fire_casting_event(block, rays_cast, false);
+        //iXY::set* changes = BM.changed_pixels();
+        //for (iXY change : *changes) {
+        //    XYZ color = ImageHandler::post_process_pixel(*raw_output[change.Y][change.X],1,1);
+        //    GUI.commit_pixel(color,change.X, change.Y);
+        //}
     }
     void fire_casting_event(Ray_Block* block, long long& rays_cast, bool verbose) {
 
@@ -3304,6 +3288,8 @@ int main()
     //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
     
     //GUI->hold_window();
+    PackagedBVH pbvh = PackagedBVH(new BVH());
+    cout << "asdfasdfasdf   " << sizeof(pbvh) << endl;
     SceneManager* scene_manager = load_default_scene();
     scene_manager->render(640,640,1);
     /*auto l = scene_manager->RE.test_bvh->flatten(-1);
