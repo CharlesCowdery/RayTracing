@@ -921,7 +921,7 @@ public:
         diff_spread = (r_f*r_f)*PI/2;
     }
     decimal get_diffuse_factor() const {
-        return 1-get_specular_factor();
+        return 1-min(max(metallic, specular), (decimal)1.0);
     }
     decimal get_specular_factor() const {
         return min(max(metallic,specular),(decimal)1.0);
@@ -1914,10 +1914,10 @@ private:
 
 class PackagedBVH { //memory optimized. produced once the BVH tree is finalized
 public:
-    int32_t index;
+    int64_t index;
     XYZ sMax;
     XYZ sMin;
-    int32_t leaf_size;
+    int64_t leaf_size;
     PackagedBVH(BVH* target) {
         sMax = target->max;
         sMin = target->min;
