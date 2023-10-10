@@ -707,12 +707,14 @@ decimal Scos(decimal theta) {
     return 1 - (theta * theta) / 2 + (theta * theta * theta * theta) / 24;
 }
 
-#define LOOKUP_SIZE_TRIG 4096
-#define LOOKUP_SIZE_TRIG_MASK LOOKUP_SIZE_TRIG-1
+#define LOOKUP_SIZE_TRIG 1024
+#define LOOKUP_TRIG_MASK LOOKUP_SIZE_TRIG-1
+#define LOOKUP_SIZE_BIASED_HEMI 4096
+#define LOOKUP_BIASED_HEMI_MASK LOOKUP_SIZE_BIASED_HEMI-1
 
 decimal sin_lookup[LOOKUP_SIZE_TRIG];
 decimal cos_lookup[LOOKUP_SIZE_TRIG];
-
+XYZ biased_hemi_lookup[LOOKUP_SIZE_BIASED_HEMI];
 
 namespace VecLib{
     static void prep() {
@@ -720,25 +722,26 @@ namespace VecLib{
             sin_lookup[i] = sin((double)i / LOOKUP_SIZE_TRIG * 2 * PI);
             cos_lookup[i] = cos((double)i / LOOKUP_SIZE_TRIG * 2 * PI);
         }
+        for (int i = 0; i < LOOKUP_SIZE_BIASED_HEMI; i++) {
+            double r1 = fRand(0,1);
+            double r2 = fRand(0, 1);
+            double f1 = acos(2 * r1 - 1) - PI / 2;
+            double f2 = 2 * PI * r2;
+            XYZ pos = XYZ(0,1,0)+XYZ(sin(f1) * cos(f2), sin(f1), cos(f1)* sin(f2));
+            biased_hemi_lookup[i] = XYZ::slope(0, pos);
+        }
     }
     static decimal Lsin(decimal input) {
-        int index = ((int)(input * LOOKUP_SIZE_TRIG / (PI * 2))) & LOOKUP_SIZE_TRIG_MASK;
+        int index = ((int)(input * LOOKUP_SIZE_TRIG / (PI * 2))) & LOOKUP_TRIG_MASK;
         return sin_lookup[index];
     }
     static decimal Lcos(decimal input) {
-        int index = ((int)(input * LOOKUP_SIZE_TRIG / (PI * 2))) & LOOKUP_SIZE_TRIG_MASK;;
+        int index = ((int)(input * LOOKUP_SIZE_TRIG / (PI * 2))) & LOOKUP_TRIG_MASK;
         return cos_lookup[index];
     }
-    static XYZ random_hemi() {
-        decimal x;
-        decimal y;
-        decimal z;
-        //do {
-            x = fRand(-1, 1);
-            y = fRand(0, 1);
-            z = fRand(-1, 1);
-        //} while (x * x + y * y + z * z > 1);
-        return XYZ(x, y, z)/sqrt(x * x + y * y + z * z);
+    static XYZ biased_random_hemi() {
+        int index = xe_next()&LOOKUP_BIASED_HEMI_MASK;
+        return biased_hemi_lookup[index];
     }
     static XYZ lookup_random_cone(decimal spread) {
         decimal y_f = fRand(0, spread);
@@ -856,6 +859,9 @@ public:
     static XYZ aligned_random(decimal spread, const Matrix3x3& r) {
         return applyRotationMatrix(VecLib::lookup_random_cone(spread),r);
     }
+    static XYZ aligned_biased_hemi(const Matrix3x3& r) {
+        return applyRotationMatrix(VecLib::biased_random_hemi(), r);
+    }
     static XYZ multiply_vertically(const Matrix3x3& mat, const XYZ& other) {
         return XYZ(
             other.X * mat.data[0] + other.Y * mat.data[3] + other.Z * mat.data[6],
@@ -912,7 +918,7 @@ public:
         k = pow(roughness + 1, 2) / 8;
         a_2 = roughness * roughness;
         spec_color = get_specular_color();
-        I_spec = 1-get_specular_color();
+        I_spec = 1-get_fresnel_0();
         spec_f = get_specular_factor();
         diff_f = get_diffuse_factor();
         diff_c = get_diffuse_color();
@@ -923,17 +929,29 @@ public:
     decimal get_diffuse_factor() const {
         return 1-get_specular_factor();
     }
+    XYZ get_fresnel_0() const {
+        return XYZ::linear_mix(metallic, XYZ(0.04), color);
+    }
+    XYZ get_diffuse_reflectance() const {
+        return color * (1 - metallic);
+    }
     decimal get_specular_factor() const {
         return min(max(metallic,specular),(decimal)1.0);
+    }
+    XYZ get_specular_factor_v2(decimal dot_NI) const {
+        return fast_fresnel(dot_NI);
+    }
+    XYZ get_diffuse_factor_v2(decimal dot_NI) const {
+        return XYZ(1)-fast_fresnel(dot_NI);
     }
     XYZ get_specular_color() const {
         return XYZ::linear_mix(metallic, specular * XYZ(1, 1, 1), color);
     }
     XYZ get_diffuse_color() const {
-        return color / PI;
+        return get_diffuse_reflectance() / PI;
     }
     XYZ get_fresnel(XYZ light_slope,XYZ normal) const {
-        XYZ specular_color = get_specular_color();
+        XYZ specular_color = get_fresnel_0();
         auto second_term = (1 - specular_color)*pow(1 - XYZ::dot(light_slope, normal), 5);
         return specular_color + second_term;
     }
@@ -975,6 +993,25 @@ public:
     decimal fastGeo_both(const decimal dot_NO, const decimal dot_NI) const {
         return dot_NO / (dot_NO * (1 - k) + k) * dot_NI / (dot_NI * (1 - k) + k);
     }
+    XYZ diffuse_BRDF(decimal dot_NI) const {
+        return get_diffuse_factor_v2(dot_NI)*get_diffuse_reflectance();
+    }
+    XYZ specular_BRDF(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
+        decimal dot_NI = XYZ::dot(normal, input_slope);
+        decimal dot_NO = XYZ::dot(normal, output_slope);
+        if (dot_NI <= 0 || dot_NO <= 0) {
+            return XYZ(0, 0, 0);
+        }
+        XYZ half_vector = XYZ::normalize(XYZ::add(input_slope, output_slope));
+        decimal dot_HO = XYZ::dot(half_vector, output_slope);
+        decimal dot_NH = XYZ::dot(normal, half_vector);
+        XYZ fresnel = fast_fresnel(dot_HO);
+        decimal geo = fastGeo_both(dot_NO, dot_NI);
+        decimal normal_dist = fast_normal_dist(dot_NH);
+        decimal divisor = 4 * dot_NI * dot_NO;
+
+        return geo * normal_dist * fresnel/divisor;
+    }
     XYZ fast_BRDF_co(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
         decimal dot_NI = XYZ::dot(normal, input_slope);
         decimal dot_NO = XYZ::dot(normal, output_slope);
@@ -1014,9 +1051,6 @@ public:
         //return fresnel;//specular_output;
         return BRDF_color* XYZ::dot(normal, input_slope);//
     }
-    XYZ calculate_BRDF(XYZ normal, XYZ input_light, XYZ input_slope, XYZ output_slope) const {
-        return calculate_BRDF_coefficient(normal, input_slope, output_slope);
-    }
     XYZ random_bounce(const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) const {
         decimal prob = fRand(0, 1);
         if(prob<diff_f){
@@ -1025,27 +1059,12 @@ public:
         else {
             return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
         }
-
     }
-    XYZ fast_bounce(const XYZ& normal, const XYZ& input_slope) const {
-        decimal prob = fRand(0, 1);
-        if (prob < diff_f) {
-            XYZ raw = XYZ::normalize(XYZ(fRand(-1, 1), fRand(-1, 1), fRand(-1, 1)));
-            decimal result = XYZ::dot(raw, normal);
-            if (result < 0) {
-                return raw - 2 * result * normal;
-            }
-            else {
-                return raw;
-            }
-        }
-        else {
-            XYZ raw = XYZ::reflect(input_slope, normal);
-            decimal a = max(roughness - 0.1, 0.0);
-            raw += XYZ(fRand(-a, a), fRand(-a, a), fRand(-a, a));
-            raw.normalize();
-            return raw;
-        }
+    XYZ diffuse_bounce(const Matrix3x3& diffuse_rotation) const {
+        return Matrix3x3::aligned_biased_hemi(diffuse_rotation);
+    }
+    XYZ reflective_bounce(const Matrix3x3& reflection_rotation) const {
+        return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
     }
     Material atUV(decimal x, decimal y) const {
 
@@ -2471,18 +2490,17 @@ public:
                 (*ray_data.output)+= results.material->color;
             }
             if (ray_data.remaining_bounces > 0) {
-                if (ray_data.remaining_monte_carlo > 0 && results.material->roughness>0.2) {
-                    for (int i = 0; i < bounce_count; i++) {
-                        //XYZ monte_slope = results.material->fast_bounce(results.normal, flipped_output);
-                        XYZ monte_slope = results.material->random_bounce(normal_rot_m, reflection_rot_m);
-                        XYZ return_coefficient = ray_data.coefficient * results.material->fast_BRDF_co(results.normal, monte_slope, flipped_output);
+                if (ray_data.remaining_monte_carlo > 0) {
+                    for (int i = 0; i < bounce_count/2; i++) {
+                        XYZ diffuse_slope = results.material->diffuse_bounce(normal_rot_m);
+                        XYZ return_coefficient = ray_data.coefficient * results.material->diffuse_BRDF(XYZ::dot(results.normal,diffuse_slope));
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
-                            return;
+                            continue;
                         }
-                        return_coefficient = return_coefficient / (bounce_count) * 4;
+                        return_coefficient = return_coefficient / (bounce_count/2);
                         auto ray = PackagedRay(
                             ray_data.position + NEAR_THRESHOLD * results.normal * 1.1,
-                            monte_slope,
+                            diffuse_slope,
                             return_coefficient,
                             ray_data.output,
                             ray_data.remaining_bounces - 1,
@@ -2491,7 +2509,27 @@ public:
                             max(1, ray_data.monte_shadow / 4),
                             true
                         );
-                        //enqueue_ray(ray);
+                        process_ray(stats, ray);
+                        stats.diffuses_cast++;
+                    }
+                    for (int i = 0; i < bounce_count / 2; i++) {
+                        XYZ specular_slope = results.material->reflective_bounce(reflection_rot_m);
+                        XYZ return_coefficient = ray_data.coefficient * results.material->specular_BRDF(results.normal, specular_slope, flipped_output);
+                        if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
+                            continue;
+                        }
+                        return_coefficient = specular_slope / (bounce_count/2);
+                        auto ray = PackagedRay(
+                            ray_data.position + NEAR_THRESHOLD * results.normal * 1.1,
+                            specular_slope,
+                            return_coefficient,
+                            ray_data.output,
+                            ray_data.remaining_bounces - 1,
+                            ray_data.remaining_monte_carlo - 1,
+                            ray_data.monte_diffuse / 4,
+                            max(1, ray_data.monte_shadow / 4),
+                            true
+                        );
                         process_ray(stats, ray);
                         stats.diffuses_cast++;
                     }
