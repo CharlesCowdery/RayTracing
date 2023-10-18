@@ -53,6 +53,7 @@
 #define decimal float
 
 using namespace std;
+using time_point = chrono::steady_clock::time_point;
 
 /*Xorshiro256+ pseudorandom start. Not my code: https://prng.di.unimi.it/*/
 
@@ -1623,71 +1624,7 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
 }
 
 
-class Lens {
-public:
-    int resolution_x;
-    int resolution_y;
-    int subdivision_size;
-    void (*_prep)(Lens* self, int resolution_x, int resolution_y, int subdivision_size);
-    XYZ (*_at)(Lens* self, int p_x, int p_y, int sample_index);
-    void prep(int resolution_x, int resolution_y, int subdivision_size) {
-        _prep(this, resolution_x, resolution_y, subdivision_size);
-    }
-    XYZ at(int p_x, int p_y, int sample_index) {
-        return _at(this, p_x, p_y, sample_index);
-    }
 
-};
-
-class RectLens : public Lens {
-public:
-    decimal width;
-    decimal height;
-    vector<XY> subdiv_offsets;
-    vector<vector<XY>> outputs;
-    RectLens(decimal _width, decimal _height) :
-        width(_width), height(_height) {
-        _at = _at_function;
-        _prep = _prep_function;
-    }
-private:
-    static void _prep_function(Lens* self, int resolution_x, int resolution_y, int subdivision_count) {
-        RectLens* self_rect = (RectLens*)self;
-        decimal width = self_rect->width;
-        decimal height = self_rect->height;
-        decimal partial_width =  width / resolution_x;
-        decimal partial_height = height / resolution_y;
-        decimal offset_x = -width / 2;
-        decimal offset_y = -height / 2;
-        decimal subdiv_width_x = partial_width / subdivision_count;
-        decimal subdiv_width_y = partial_height / subdivision_count;
-        for (int y = 0; y < subdivision_count; y++) {
-            for (int x = 0; x < subdivision_count; x++) {
-                self_rect->subdiv_offsets.push_back(XY(
-                    subdiv_width_x * (x + 0.5),
-                    subdiv_width_y * (y + 0.5)
-                ));
-            }
-        }
-        for (int y = 0; y < resolution_y; y++) {
-            vector<XY> row;
-            for (int x = 0; x < resolution_x; x++) {
-                decimal final_x = offset_x + partial_width * x;
-                decimal final_y = offset_y + partial_height * y;
-                row.push_back(XY(
-                    final_x,
-                    final_y
-                ));
-            }
-            self_rect->outputs.push_back(row);
-        }
-
-    }
-    static XYZ _at_function(Lens* self, int p_x, int p_y, int sample_index) {
-        RectLens* self_rect = (RectLens*)self;
-        return XYZ(self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index]);   
-    }
-};
 
 class Scene {
 public:
@@ -2183,9 +2120,87 @@ struct PackagedRay {
     }
 };
 
-struct CameraConfig {
-    int reflection_bounces = 8;
-    int diffuse_bounces = 1;
+class Lens {
+public:
+    int resolution_x;
+    int resolution_y;
+    int subdivision_size;
+    void (*_prep)(Lens* self, int resolution_x, int resolution_y, int subdivision_size);
+    Lens* (*_clone)(Lens* self);
+    XYZ(*_at)(Lens* self, int p_x, int p_y, int sample_index);
+    void prep(int resolution_x, int resolution_y, int subdivision_size) {
+        _prep(this, resolution_x, resolution_y, subdivision_size);
+    }
+    XYZ at(int p_x, int p_y, int sample_index) {
+        return _at(this, p_x, p_y, sample_index);
+    }
+    Lens* clone() {
+        Lens* obj = _clone(this);
+        obj->resolution_x = resolution_x;
+        obj->resolution_y = resolution_y;
+        obj->subdivision_size = subdivision_size;
+        return obj;
+    }
+
+};
+
+class RectLens : public Lens {
+public:
+    decimal width;
+    decimal height;
+    vector<XY> subdiv_offsets;
+    vector<vector<XY>> outputs;
+    RectLens(decimal _width, decimal _height) :
+        width(_width), height(_height) {
+        _at = _at_function;
+        _prep = _prep_function;
+        _clone = _clone_function;
+    }
+private:
+    static void _prep_function(Lens* self, int resolution_x, int resolution_y, int subdivision_count) {
+        RectLens* self_rect = (RectLens*)self;
+        decimal width = self_rect->width;
+        decimal height = self_rect->height;
+        decimal partial_width = width / resolution_x;
+        decimal partial_height = height / resolution_y;
+        decimal offset_x = -width / 2;
+        decimal offset_y = -height / 2;
+        decimal subdiv_width_x = partial_width / subdivision_count;
+        decimal subdiv_width_y = partial_height / subdivision_count;
+        for (int y = 0; y < subdivision_count; y++) {
+            for (int x = 0; x < subdivision_count; x++) {
+                self_rect->subdiv_offsets.push_back(XY(
+                    subdiv_width_x * (x + 0.5),
+                    subdiv_width_y * (y + 0.5)
+                ));
+            }
+        }
+        for (int y = 0; y < resolution_y; y++) {
+            vector<XY> row;
+            for (int x = 0; x < resolution_x; x++) {
+                decimal final_x = offset_x + partial_width * x;
+                decimal final_y = offset_y + partial_height * y;
+                row.push_back(XY(
+                    final_x,
+                    final_y
+                ));
+            }
+            self_rect->outputs.push_back(row);
+        }
+
+    }
+    static XYZ _at_function(Lens* self, int p_x, int p_y, int sample_index) {
+        RectLens* self_rect = (RectLens*)self;
+        return XYZ(self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index]);
+    }
+    static Lens* _clone_function(Lens* self) {
+        RectLens* rect_self = (RectLens*)self;
+        Lens* obj = new RectLens(rect_self->width, rect_self->height);
+        RectLens* rect_obj = (RectLens*)obj;
+        rect_obj->outputs = rect_self->outputs;
+        rect_obj->subdiv_offsets = rect_self->subdiv_offsets;
+        return obj;
+    }
 };
 
 class Camera {
@@ -2193,23 +2208,17 @@ class Camera {
     //and to allow progressive output updates during monte carlo rendering
 public:
     XYZ position;
-    Scene* scene;
 
     Lens* lens;
     XYZ focal_position;
 
-    
-
-    vector<vector<vector<XYZ*>>> ray_outputs;
-    vector<vector<XYZ*>> image_output;
-
     int current_resolution_x = 0;
     int current_resolution_y = 0;
 
-    Camera(Scene* _scene, XYZ _position, Lens* _lens, decimal focal_distance) : scene(_scene),
+    Camera(XYZ _position, Lens* _lens, decimal focal_distance) :
         lens(_lens), position(_position), focal_position(XYZ(0,0,-focal_distance)) {}
 
-    Camera(Scene* _scene, XYZ _position, Lens* _lens, XYZ _focal_position) : scene(_scene),
+    Camera(XYZ _position, Lens* _lens, XYZ _focal_position) :
         lens(_lens), position(_position), focal_position(_focal_position) {}
 
     void prep(int resolution_x, int resolution_y, int samples) {
@@ -2220,6 +2229,18 @@ public:
 
     XYZ slope_at(int p_x, int p_y, int sample_index) {
         return XYZ::slope(focal_position,lens->at(p_x, p_y, sample_index));
+    }
+
+    Camera* clone() {
+        Lens* new_lens = lens->clone();
+        Camera* obj = new Camera(position, new_lens, focal_position);
+        obj->current_resolution_x = current_resolution_x;
+        obj->current_resolution_y = current_resolution_y;
+        return obj;
+    }
+
+    ~Camera() {
+        delete lens;
     }
 };
 
@@ -2690,7 +2711,7 @@ public:
             
             if (ray_data.remaining_bounces > 0) {
                 if (ray_data.remaining_monte_carlo > 0) {
-                    for (int i = 0; i < bounce_count; i++) {
+                    for (int i = 0; i < bounce_count/2; i++) {
                         XYZ diffuse_slope = material.diffuse_bounce(normal_rot_m);
                         XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal,diffuse_slope));
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
@@ -2711,7 +2732,7 @@ public:
                         process_ray(stats, ray);
                         stats.diffuses_cast++;
                     }
-                    for (int i = 0; i < 0; i++) {
+                    for (int i = 0; i < bounce_count/2; i++) {
                         XYZ specular_slope = material.reflective_bounce(reflection_rot_m);
                         XYZ return_coefficient = ray_data.coefficient * material.specular_BRDF(normal, specular_slope, flipped_output);
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
@@ -2755,7 +2776,7 @@ public:
                     stats.reflections_cast++;
                 }
             }
-            if (ray_data.check_lighting) {
+            if (shadow_count>0) {
                 for (const PointLikeLight& PLL : lights) {
                     XYZ light_slope = XYZ::slope(ray_data.position, PLL.origin);
                     Quat light_rot = Quat::makeRotation(XYZ(0, 1, 0), light_slope);
@@ -3079,7 +3100,6 @@ namespace ImageHandler {
 
 
 
-
 class SceneManager {
 public:
     Camera* camera;
@@ -3122,7 +3142,7 @@ public:
         GUI.create_window();
         prepGUI();
         cout <<endl << "+RAYCASTING+" << endl;
-        run_engine(true);
+        _run_engine(true);
 
     }
     void hold_window() {
@@ -3166,9 +3186,9 @@ private:
         XYZ start_position = emit_coord;
         XYZ starting_coefficient = XYZ(1, 1, 1)/current_samples_per_pixel;
         int max_bounces = 1;
-        int monte_bounce_count = 1;
-        int diffuse_emit_count = 1024/current_samples_per_pixel;
-        int lighting_emit_count = 0/current_samples_per_pixel;
+        int monte_bounce_count = 0;
+        int diffuse_emit_count = 1024 / current_samples_per_pixel;
+        int lighting_emit_count = 128 / current_samples_per_pixel;
 
         
         for (int i_y = 0; i_y < y_increment; i_y++) {
@@ -3227,6 +3247,223 @@ private:
         cout << "Ray Casting Done [" << to_string(millis) << "ms][" << blocks_processed << " Blocks Processed]" << endl;
         cout << "Approximate speed: " << intToEng((rays_cast / (millis / 1000.0))) << " rays/s";
     }
+    void _run_engine(bool show_debug) {
+        processing_info process_info;
+
+        process_info.emit_coord = camera->focal_position + camera->position;
+        process_info.starting_coefficient = XYZ(1, 1, 1) / current_samples_per_pixel;
+
+        process_info.res_y = current_resolution_y;
+        process_info.res_x = current_resolution_x;
+        process_info.y_increment = y_increment;
+        process_info.x_increment = x_increment;
+        process_info.block_size = block_size;
+        process_info.samples_per_pixel = current_samples_per_pixel;
+        process_info.pixels_per_block = block_size * block_size;
+
+        process_info.raws = &raw_output;
+        process_info.camera = camera->clone();
+
+        process_info.max_bounces = 4;
+        process_info.monte_bounce_count = 1;
+        process_info.diffuse_emit_count = 4096 / current_samples_per_pixel;
+        process_info.lighting_emit_count = 0 / current_samples_per_pixel;
+        
+        for (int i_y = y_increment-1; i_y >= 0; i_y--) {
+            for (int i_x = 0; i_x < x_increment; i_x++) {
+                process_block_at(i_x,i_y,process_info);
+            }
+        }
+        refresh_canvas();
+        cout << endl;
+
+        auto end_time = chrono::high_resolution_clock::now();
+        double millis = chrono::duration_cast<chrono::milliseconds>(end_time - process_info.start_time).count();
+        cout << "Ray Casting Done [" << to_string(millis) << "ms]" << endl;
+        cout << "Approximate speed: " << intToEng((process_info.rays_cast() / (millis / 1000.0))) << " rays/s";
+        processing_info;
+    };
+    struct processing_info {
+        processing_info() {}
+
+        time_point start_time = chrono::high_resolution_clock::now();
+        time_point last_update_time = chrono::high_resolution_clock::now();
+        
+        Casting_Diagnostics CD;
+        long long parent_rays_cast = 0;
+        long long child_rays_cast = 0;    
+        long long parent_rays_cast_last_update = 0;
+        long long child_rays_cast_last_update = 0;
+
+        long long debug_check_ray_interval = 16;
+        long long debug_check_ray_interval_max = 1024*1024;
+        long long debug_check_ray_interval_min = 1;
+        long long micro_delta_update_min = 5000;
+        long long micro_delta_update_target = 16000;
+
+        long long delta_period_millis = 200;
+
+        vector<vector<XYZ*>>* raws;
+        int block_size = 0;
+        int res_y = 0;
+        int res_x = 0;
+        int y_increment = 0;
+        int x_increment = 0;
+        int pixels_per_block = 0;
+        int samples_per_pixel = 0;
+
+        int pixels_done = 0;
+
+        Camera* camera; 
+
+        XYZ emit_coord;
+        XYZ starting_coefficient;
+        int max_bounces = 1;
+        int monte_bounce_count = 1;
+        int diffuse_emit_count = 64;
+        int lighting_emit_count = 64;
+
+        struct hist_struct {
+            double primary;
+            double secondary;
+            time_point time;
+        };
+
+        vector<hist_struct> hist;
+
+        void add_casts() {
+            parent_rays_cast++;
+            child_rays_cast += CD.rays_processed - 1;
+            CD.rays_processed = 0;
+        }
+        void update_hist() {
+            hist_struct entry;
+            entry.primary = parent_rays_cast;
+            entry.secondary = child_rays_cast;
+            entry.time = chrono::high_resolution_clock::now();
+            hist.push_back(entry);
+            while (true){
+                long long delta = chrono::duration_cast<chrono::milliseconds>(entry.time - hist.front().time).count();
+                if (delta < delta_period_millis || hist.size() <= 2) {
+                    break;
+                }
+                hist.erase(hist.begin());
+            }
+        }
+        void shift_last_update() {
+            parent_rays_cast_last_update = parent_rays_cast;
+            child_rays_cast_last_update = child_rays_cast;
+            last_update_time = chrono::high_resolution_clock::now();
+        }
+        long long delta_time(time_point now) {
+            return chrono::duration_cast<chrono::microseconds>(now - hist.front().time).count();
+        }
+        long long delta_parent() {
+            return parent_rays_cast - hist.front().primary;
+        }
+        long long delta_child() {
+            return child_rays_cast - hist.front().secondary;
+        }
+        long long delta_total() {
+            return delta_parent() + delta_child();
+        }
+        long long parent_rays_since_last() {
+            return parent_rays_cast - parent_rays_cast_last_update;
+        }
+        long long child_rays_since_last() {
+            return child_rays_cast - child_rays_cast_last_update;
+        }
+        long long rays_cast() {
+            return parent_rays_cast + child_rays_cast;
+        }
+        long long rays_cast_since_update() {
+            return parent_rays_since_last() + child_rays_since_last();
+        }
+        double percent() {
+            return ((double)pixels_done) / (res_x * res_y);
+        }
+        iXY get_coord_from_block(int block_xi, int block_yi, int i) {
+            iXY block_offset = iXY(block_xi * block_size, block_yi * block_size);
+            iXY inside_offset = iXY(i % block_size, block_size-i / block_size-1);
+            return block_offset + inside_offset;
+        }
+        XYZ* get_output_link(iXY coord) {
+            return (*raws)[coord.Y][coord.X];
+        }
+        XYZ slope_at(iXY coord, int sub_index) {
+            return camera->slope_at(coord.X, coord.Y, sub_index);
+        }
+        bool check_update() {
+            if (rays_cast_since_update() > debug_check_ray_interval) {
+                time_point now = chrono::high_resolution_clock::now();
+                long long micro_delta = chrono::duration_cast<chrono::microseconds>(now - last_update_time).count();
+                if (micro_delta > micro_delta_update_min) {
+                    debug_check_ray_interval *= micro_delta_update_target / ((double)micro_delta);
+                    debug_check_ray_interval = min(debug_check_ray_interval, debug_check_ray_interval_max);
+                    debug_check_ray_interval = max(debug_check_ray_interval, debug_check_ray_interval_min);
+                    return true;
+                }
+            }
+            return false;
+        }
+        ~processing_info() {
+            delete camera;
+        }
+    };
+
+    void process_block_at(int block_x, int block_y, processing_info& process_info) {
+        GUI.set_focus_position(0, block_x*block_size, block_y*block_size);
+        for (int pixel_index = 0; pixel_index < process_info.pixels_per_block; pixel_index++) {
+            iXY pixel_coordinate = process_info.get_coord_from_block(block_x, block_y, pixel_index);
+            XYZ* output_link = process_info.get_output_link(pixel_coordinate);
+            for (int sub_index = 0; sub_index < process_info.samples_per_pixel; sub_index++) {
+                XYZ ray_slope = process_info.slope_at(pixel_coordinate, sub_index);
+                auto ray = PackagedRay(
+                    process_info.emit_coord,
+                    ray_slope,
+                    process_info.starting_coefficient,
+                    output_link,
+                    process_info.max_bounces,
+                    process_info.monte_bounce_count,
+                    process_info.diffuse_emit_count,
+                    process_info.lighting_emit_count,
+                    true
+                );
+                RE.process_ray(process_info.CD, ray);
+                process_info.add_casts();
+            }
+            process_info.pixels_done++;
+            XYZ color = ImageHandler::post_process_pixel(*raw_output[pixel_coordinate.Y][pixel_coordinate.X], 1, 1);
+            GUI.commit_pixel(color, pixel_coordinate.X,pixel_coordinate.Y);
+            if (process_info.check_update()) {
+                process_info.update_hist();
+
+                auto now = chrono::high_resolution_clock::now();
+                int seconds = chrono::duration_cast<chrono::seconds>(now - render_start).count();
+                int minutes = seconds / 60;
+                int hours = minutes / 60;
+                seconds %= 60;
+                minutes %= 60;
+                int micro_delta = chrono::duration_cast<chrono::microseconds>(now - process_info.last_update_time).count();
+                int milli_delta = micro_delta / 1000;
+                double second_ratio = ((double)1000000) / process_info.delta_time(now);
+                   
+                string primary_per_sec = intToEng(second_ratio * process_info.delta_parent());
+                string secondary_per_sec = intToEng(second_ratio * process_info.delta_child());
+                string total_per_sec = intToEng(second_ratio * process_info.delta_total());
+
+                int percent_done = process_info.percent() * 100;
+
+                string format_string = "[%02i:%02i:%02i][%7ims] - ([%.5srays/s Primary][%.5srays/s Secondary])[%.5srays/s] - [%3i%%]\r";
+                printf(format_string.c_str(), hours, minutes, seconds, milli_delta, primary_per_sec.c_str(), secondary_per_sec.c_str(), total_per_sec.c_str(), percent_done);
+
+                GUI.commit_canvas();
+                GUI.handle_events();
+                process_info.shift_last_update();
+            }
+        }
+    }
+    
     void refresh_canvas() {
         for (int y = 0; y < current_resolution_y; y++) {
             for (int x = 0; x < current_resolution_x; x++) {
@@ -3482,7 +3719,7 @@ SceneManager* load_default_scene() {
     Scene* scene = new Scene();
 
     Lens* lens = new RectLens(1, 1);
-    Camera* camera = new Camera(scene, XYZ(0, -0.3, -2), lens , XYZ(0,0,-4));
+    Camera* camera = new Camera(XYZ(0, -0.3, -2), lens , XYZ(0,0,-4));
 
     Material* sphere_mat = new Material();
     sphere_mat->color.set_static(XYZ(0.2, 0.2, 1));//XYZ(0.24725, 0.1995, 0.0745);
@@ -3529,13 +3766,14 @@ SceneManager* load_default_scene() {
     //mesh_mat->color = XYZ(1);
     mesh_mat->roughness.set_static(0.2);
     //mesh_mat->roughness.set_texture(path+"roughness.bmp");
-    mesh_mat->specular.set_static(1);
+    mesh_mat->specular.set_static(0.5);
     //mesh_mat->specular.set_texture(path+"specular.bmp");
     mesh_mat->metallic.set_static(0);
     //mesh_mat->normal.set_texture(path + "normal_8k.png");
     // 
     //Mesh* mesh = FileManager::loadTriFile("C:\\Users\\Charlie\\Documents\\RobotLab.tri", mesh_mat);
-    Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\head_rust.obj", mesh_mat);
+    //Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\head_rust.obj", mesh_mat);
+    Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\fumo.obj", mesh_mat);
     //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\lowfumo.obj",mesh_mat);
     Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
     m_obj->addMesh(mesh);
@@ -3701,7 +3939,7 @@ int main()
     
     //GUI->hold_window();
     SceneManager* scene_manager = load_default_scene();
-    scene_manager->render(640*1.6,640*1.6,8);
+    scene_manager->render(640*1.6,640*1.6,4);
     
     cout << endl << "writing out raw......." << flush;
     FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
