@@ -20,13 +20,16 @@
 #include <unordered_set>
 #include <queue>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #include <cassert>
 #include <intrin.h>
 
 #define assertm(exp, msg) assert(((void)msg, exp))
 #define SMALL 0.001
 #define NEAR_THRESHOLD 0.001
-#define SCENE_BOUNDS 100
+#define SCENE_BOUNDS 10000
 #define RED_MASK 255<<16
 #define GREEN_MASK 255<<8
 #define BLUE_MASK 255
@@ -38,8 +41,11 @@
 
 #define kEpsilon 0.000000001
 
-#define FULL_BRIGHT false
+#define DRAW_COLOR false
 #define DEPTH_VIEW false
+#define DRAW_UV false
+#define DRAW_NORMAL false
+#define GENERATED_TEXTURE_RESOLUTION 2048
 
 //defines program precision
 #define LEAF_SIZE 2
@@ -155,6 +161,13 @@ vector<string> eng_levels = vector<string>{
     "Qu"
 };
 
+string padString(string s, string padder, int size) {
+    string out = s;
+    while (out.size() < size) {
+        out += padder;
+    }
+    return out;
+}
 
 string iToFixedLength(int input,int length, string fill = " ") {
     string in = to_string(input);
@@ -272,7 +285,9 @@ struct XY {
     };
     typedef unordered_set<XY, XY::HashFunction> set;
 };
-
+XY operator*(const decimal& self, const XY& coord) {
+    return coord * self;
+}
 struct XYZ {
 public:
     decimal X;
@@ -283,6 +298,7 @@ public:
     XYZ(decimal _X, decimal _Y, decimal _Z) : X(_X), Y(_Y), Z(_Z) {}
     XYZ(XY xy, decimal _Z) : X(xy.X), Y(xy.Y), Z(_Z) {}
     XYZ(XY xy) : XYZ(xy, 0) {}
+    XYZ(sf::Color c) : XYZ(c.r, c.g, c.b) {}
     XYZ clone() {
         return XYZ(X, Y, Z);
     }
@@ -881,16 +897,147 @@ public:
 typedef tuple<XYZ, XYZ, XYZ> Face;
 typedef tuple<bool, bool, bool> tri_bool;
 
-class Material {
+class XYZTexture {
 public:
-    int material_type = 0;
-    XYZ color = XYZ(0,0,0);
-    decimal roughness = 0.1;
-    decimal metallic  = 0;
-    decimal specular  = 0;
-    decimal emission  = 0;
+    int resolution_x;
+    int resolution_y;
+    double U_scalar;
+    double V_scalar;
+    vector<vector<XYZ>> data;
+    XYZTexture(vector<vector<XYZ>>* data_ptr) {
+        data = *data_ptr;
+    }
+    XYZTexture(string file_name) {
+        const string file_n = file_name;
+        int width, height, original_no_channels;
+        int desired_no_channels = 3;
+        unsigned char* img = stbi_load(file_n.c_str(), &width, &height, &original_no_channels, desired_no_channels);
+        string output = padString("Attempting to fetch texture at path: " + file_n + "",".",100);
+        cout << output;
+        if (img == NULL) {
+            cout << "!Failed!";
+            throw invalid_argument("");
+        }
+        cout << "[Done]" << endl;
+        string process_string = padString(
+            "    ->Loading: ["+to_string(width)+
+            "px : "+to_string(height)+
+            "px] Channels: [original: "+to_string(original_no_channels)+
+            " ; loaded: "+ to_string(desired_no_channels)+"]"
+            ,".",100);
+        cout << process_string << flush;
+        
+        resolution_x = width;
+        resolution_y = height;
+        for (int y = 0; y < resolution_y; y++) {
+            data.push_back(vector<XYZ>());
+            for (int x = 0; x < resolution_x; x++) {
+                int position = y * resolution_x*3 + x*3;
+                float r = (float) img[position];
+                float g = (float) img[position + 1];
+                float b = (float) img[position + 2];
+                XYZ color = XYZ(r / 256.0, g / 256.0, b / 256.0);
+                color = (color - XYZ(0.5)) * 2;
+                data.back().push_back(color);
+;            }
+        }
+        delete[] img;
+        U_scalar = resolution_x;
+        V_scalar = resolution_y;
+        cout << "[Done]" << endl;
+    }
+    void prep() {
+        U_scalar = resolution_x;
+        V_scalar = resolution_y;
+    }
+    XYZ lookup(int x, int y) {
+        return data[y][x];
+    }
+    XYZ getUV(double U, double V) {
+        V = 1 - V;
+        int pos_x = floor(U_scalar * U);
+        int pos_y = floor(V_scalar * V);
+        return lookup(pos_x, pos_y);
+    }
+    XYZ getPixelLinear(double U, double V) {
+        double x_1 = U_scalar * U - 0.5 * U_scalar;
+        double x_2 = U_scalar * U + 0.5 * U_scalar;
+        double y_1 = V_scalar * V - 0.5 * V_scalar;
+        double y_2 = V_scalar * V + 0.5 * V_scalar;
+        int pos_x_1 = std::max(0,std::min(resolution_x-1,(int)floor(x_1)));
+        int pos_x_2 = std::max(0,std::min(resolution_x-1,(int)floor(x_2)));
+        int pos_y_1 = std::max(0,std::min(resolution_y-1,(int)floor(y_1)));
+        int pos_y_2 = std::max(0,std::min(resolution_y-1,(int)floor(y_2)));
+        XYZ c1 = lookup(pos_x_1, pos_y_1);
+        XYZ c2 = lookup(pos_x_2, pos_y_1);
+        XYZ c3 = lookup(pos_x_1, pos_y_2);
+        XYZ c4 = lookup(pos_x_2, pos_y_2);
+        double f1 = pos_x_2 - x_1;
+        double f2 = x_2 - pos_x_2;
+        double f3 = pos_y_2 - y_1;
+        double f4 = y_2 - pos_y_2;
+        XYZ c_m1 = f1 * c1 + f2 * c2;
+        XYZ c_m2 = f1 * c3 + f2 * c4;
+        return f3 * c_m1 + f4 * c_m2;
+    }
+};
 
-    XYZ emissive_color = XYZ(0, 0, 0);
+class Parameter {
+public:
+    XYZ static_value = 0;
+    XYZTexture* texture = nullptr;
+    Parameter(decimal X, decimal Y, decimal Z) : static_value(XYZ(X,Y,Z)) {}
+    Parameter(XYZ value) : static_value(value) {}
+    Parameter(XYZTexture* texture_ptr) : texture(texture_ptr) {}
+    Parameter(string file_name) : texture(new XYZTexture(file_name)) {}
+    void set_static(double value) {
+        static_value.X = value;
+    }
+    void set_static(XYZ value) {
+        static_value = XYZ(value);
+    }
+    void prep() {
+        if (texture != nullptr) {
+            texture->prep();
+        }
+    }
+    void set_texture(XYZTexture* texture_ptr, bool free = false) {
+        if (texture != nullptr) {
+            if (free) {
+                delete texture;
+            }
+        }
+        texture = texture_ptr;
+    }
+    void set_texture(string file_name, bool free = false) {
+        set_texture(new XYZTexture(file_name),free);
+    }
+    XYZ getXYZ(double U, double V) {
+        if (texture != nullptr) {
+            return texture->getUV(U, V);
+        }
+        else {
+            return static_value;
+        }
+    }
+    double getSingle(double U, double V) {
+        if (texture != nullptr) {
+            return texture->getUV(U, V).X;
+        }
+        else {
+            return static_value.X;
+        }
+    }
+};
+
+class MaterialSample {
+public:
+    XYZ color;
+    decimal roughness;
+    decimal metallic;
+    decimal specular;
+    XYZ emissive;
+    XYZ normal;
 
     decimal k = 0;
     decimal a_2 = 0;
@@ -902,32 +1049,27 @@ public:
     XYZ spec_color = XYZ();
     XYZ I_spec = XYZ();
 
-    Material() {}
-    Material(XYZ _color) : color(_color) {}
-    Material* clone() {
-        Material* new_self = new Material(color);
-        new_self->material_type = 0;
-        new_self->roughness = roughness;
-        new_self->metallic = metallic;
-        new_self->specular = specular;
-        new_self->emission = emission;
-        new_self->emissive_color = emissive_color.clone();
-        return new_self;
-    }
-    void prep() {
+    MaterialSample(XYZ _color, decimal _roughness, decimal _metallic, decimal _specular, XYZ _emissive, XYZ _normal) {
+        color = _color;
+        roughness = _roughness;
+        metallic = _metallic;
+        specular = _specular;
+        emissive = _emissive;
+        normal = _normal;
+
         k = pow(roughness + 1, 2) / 8;
         a_2 = roughness * roughness;
         spec_color = get_specular_color();
-        I_spec = 1-get_fresnel_0();
+        I_spec = 1 - get_fresnel_0();
         spec_f = get_specular_factor();
         diff_f = get_diffuse_factor();
         diff_c = get_diffuse_color();
         diff_t = diff_c * diff_f;
         decimal r_f = roughness - 0.2;
-        diff_spread = (r_f*r_f)*PI/2;
+        diff_spread = (r_f * r_f) * PI / 2;
     }
     decimal get_diffuse_factor() const {
-        return 1-get_specular_factor();
+        return 1 - get_specular_factor();
     }
     XYZ get_fresnel_0() const {
         return XYZ::linear_mix(metallic, XYZ(0.04), color);
@@ -936,13 +1078,13 @@ public:
         return color * (1 - metallic);
     }
     decimal get_specular_factor() const {
-        return min(max(metallic,specular),(decimal)1.0);
+        return min(max(metallic, specular), (decimal)1.0);
     }
     XYZ get_specular_factor_v2(decimal dot_NI) const {
         return fast_fresnel(dot_NI);
     }
     XYZ get_diffuse_factor_v2(decimal dot_NI) const {
-        return XYZ(1)-fast_fresnel(dot_NI);
+        return XYZ(1) - fast_fresnel(dot_NI);
     }
     XYZ get_specular_color() const {
         return XYZ::linear_mix(metallic, specular * XYZ(1, 1, 1), color);
@@ -950,9 +1092,9 @@ public:
     XYZ get_diffuse_color() const {
         return get_diffuse_reflectance() / PI;
     }
-    XYZ get_fresnel(XYZ light_slope,XYZ normal) const {
+    XYZ get_fresnel(XYZ light_slope, XYZ normal) const {
         XYZ specular_color = get_fresnel_0();
-        auto second_term = (1 - specular_color)*pow(1 - XYZ::dot(light_slope, normal), 5);
+        auto second_term = (1 - specular_color) * pow(1 - XYZ::dot(light_slope, normal), 5);
         return specular_color + second_term;
     }
     XYZ fast_fresnel(decimal dot_NI) const {
@@ -962,8 +1104,8 @@ public:
     decimal get_normal_distribution_beta(const XYZ& normal, const XYZ& half_vector) const {
         decimal a = roughness;
         decimal dot = XYZ::dot(normal, half_vector);
-        decimal exponent = -(1 - pow(dot, 2)) / (pow(a*dot,2));
-        decimal base = 1 / (PI * pow(a,2) * pow(dot, 4));
+        decimal exponent = -(1 - pow(dot, 2)) / (pow(a * dot, 2));
+        decimal base = 1 / (PI * pow(a, 2) * pow(dot, 4));
         decimal final = base * exp(exponent);
 
         return final;
@@ -972,19 +1114,19 @@ public:
         decimal a = roughness;
         decimal dot = XYZ::dot(normal, half_vector);
         decimal final = (a * a)
-                          /
-            (PI * pow((dot*dot)*(a*a-1)+1,2));
+            /
+            (PI * pow((dot * dot) * (a * a - 1) + 1, 2));
 
         return final;
     }
     decimal fast_normal_dist(const decimal dot_NH) const {
         decimal a_2 = roughness * roughness;
-        decimal g = dot_NH*dot_NH*(a_2-1)+1;
-        return dot_NH*(a_2) / (PI * g*g);
+        decimal g = dot_NH * dot_NH * (a_2 - 1) + 1;
+        return dot_NH * (a_2) / (PI * g * g);
     }
-    decimal geoSchlickGGX(const XYZ& normal, const XYZ& vector,  decimal k) const {
+    decimal geoSchlickGGX(const XYZ& normal, const XYZ& vector, decimal k) const {
 
-        decimal dot = XYZ::dot(normal,vector);
+        decimal dot = XYZ::dot(normal, vector);
 
         return dot / (dot * (1 - k) + k);
         //return 1;
@@ -994,7 +1136,7 @@ public:
         return dot_NO / (dot_NO * (1 - k) + k) * dot_NI / (dot_NI * (1 - k) + k);
     }
     XYZ diffuse_BRDF(decimal dot_NI) const {
-        return get_diffuse_factor_v2(dot_NI)*get_diffuse_reflectance();
+        return get_diffuse_factor_v2(dot_NI) * get_diffuse_reflectance();
     }
     XYZ specular_BRDF(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
         decimal dot_NI = XYZ::dot(normal, input_slope);
@@ -1008,9 +1150,9 @@ public:
         XYZ fresnel = fast_fresnel(dot_HO);
         decimal geo = fastGeo_both(dot_NO, dot_NI);
         decimal normal_dist = fast_normal_dist(dot_NH);
-        decimal divisor = 4 * dot_NI * dot_NO;
+        decimal divisor = 4 * dot_NO;
 
-        return geo * normal_dist * fresnel/divisor;
+        return geo * normal_dist * fresnel;// / divisor;
     }
     XYZ fast_BRDF_co(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
         decimal dot_NI = XYZ::dot(normal, input_slope);
@@ -1026,35 +1168,13 @@ public:
         decimal normal_dist = fast_normal_dist(dot_NH);
         decimal divisor = 4 * dot_NI * dot_NO;
 
-        return (spec_f * (geo * normal_dist * fresnel) / divisor+diff_t)*dot_NI;
+        return ((geo * normal_dist * fresnel) / divisor + diffuse_BRDF(dot_NI)) * dot_NI;
 
-    }
-    XYZ calculate_BRDF_coefficient(XYZ normal, XYZ input_slope, XYZ output_slope) const {
-        
-        if (XYZ::dot(normal, input_slope) <= 0 || XYZ::dot(normal, output_slope) <= 0) {
-            return XYZ(0,0,0);
-        }
-
-        XYZ half_vector = XYZ::add(input_slope, output_slope);
-        half_vector.normalize();
-        XYZ fresnel = get_fresnel(output_slope, half_vector);
-        auto geo = geoSchlickGGX(normal, output_slope, k) * geoSchlickGGX(normal, input_slope, k);//Smiths method
-        auto normal_dist = get_normal_distribution_GGXTR(normal, half_vector);
-        decimal divisor = (4 * XYZ::dot(normal, input_slope) * XYZ::dot(normal, output_slope));
-        //fresnel = XYZ(1,1,1);
-        //geo = 1;
-        //normal_dist = 1;
-        //divisor = 4;
-        XYZ specular_output = get_specular_factor()*(geo * normal_dist * fresnel) / divisor; //* ;
-        XYZ diffuse_output = get_diffuse_factor() * get_diffuse_color();
-        XYZ BRDF_color = specular_output + diffuse_output;
-        //return fresnel;//specular_output;
-        return BRDF_color* XYZ::dot(normal, input_slope);//
     }
     XYZ random_bounce(const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) const {
         decimal prob = fRand(0, 1);
-        if(prob<diff_f){
-            return Matrix3x3::aligned_random(PI/2, diffuse_rotation);
+        if (prob < diff_f) {
+            return Matrix3x3::aligned_random(PI / 2, diffuse_rotation);
         }
         else {
             return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
@@ -1066,11 +1186,42 @@ public:
     XYZ reflective_bounce(const Matrix3x3& reflection_rotation) const {
         return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
     }
-    Material atUV(decimal x, decimal y) const {
-
-    }
+    
     XYZ calculate_emissions() const {
-        return emission * emissive_color;
+        return emissive;
+    }
+};
+
+class Material {
+public:
+    Parameter color     = Parameter(0);
+    Parameter roughness = Parameter(0.1);
+    Parameter metallic  = Parameter(0);
+    Parameter specular  = Parameter(0);
+    Parameter emissive  = Parameter(0);
+    Parameter normal    = Parameter(0);
+
+    bool use_normals = false;
+
+    Material() {}
+
+    void prep() {
+        color.prep();
+        roughness.prep();
+        metallic.prep();
+        specular.prep();
+        emissive.prep();
+        normal.prep();
+    }
+    MaterialSample sample_UV(decimal U, decimal V) {
+        return MaterialSample(
+            color.getXYZ(U, V),
+            roughness.getSingle(U, V),
+            metallic.getSingle(U, V),
+            specular.getSingle(U, V),
+            emissive.getXYZ(U, V),
+            normal.getXYZ(U, V)
+        );
     }
 };
 
@@ -1117,19 +1268,20 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ normal;
     XYZ p1p3;
     XYZ p1p2;
+    XY UV_basis;
+    XY U_delta;
+    XY V_delta;
     Material* material;
     PackagedTri() {}
-    PackagedTri(const XYZ& p1o, const XYZ& p2o, const XYZ& p3o, const XYZ origin, Material* _material) {
-        XYZ _p2 = p2o + origin;
-        XYZ _p3 = p3o + origin;
-        PackagedTri(p1, _p2, _p3, _material);
-    }
-    PackagedTri(const XYZ _p1, const XYZ _p2, const XYZ _p3, Material* _material){
+    PackagedTri(const XYZ& _p1, const XYZ& _p2, const XYZ& _p3, XY UV_U, XY UV_V, XY UV_base, Material* _material) {
         material = _material;
         p1 = _p1;
         p1p3 = _p3 - p1;
         p1p2 = _p2 - p1;
         normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
+        U_delta = UV_U-UV_base;
+        V_delta = UV_V-UV_base;
+        UV_basis = UV_base;
     }
     static bool equals(const PackagedTri& t1, const PackagedTri& t2) {
         bool test1 = XYZ::equals(t1.p1,t2.p1);
@@ -1146,9 +1298,21 @@ public:
     XYZ p1;
     XYZ p2;
     XYZ p3;
+    XY UV_1;
+    XY UV_2;
+    XY UV_3;
     XYZ midpoint;
     XYZ AABB_max;
     XYZ AABB_min;
+    Tri(XYZ _p1, XYZ _p2, XYZ _p3, XY _UV_1, XY _UV_2, XY _UV_3, Material* _material) : Primitive(_material),
+        p1(_p1), p2(_p2), p3(_p3) {
+        midpoint = (p1 + p2 + p3) / 3;
+        AABB_max = XYZ::max(p1, XYZ::max(p2, p3));
+        AABB_min = XYZ::min(p1, XYZ::min(p2, p3));
+        UV_1 = _UV_1;
+        UV_2 = _UV_2;
+        UV_3 = _UV_3;
+    }
     Tri(XYZ _p1, XYZ _p2, XYZ _p3, Material* _material) : Primitive(_material),
         p1(_p1), p2(_p2), p3(_p3) {
         midpoint = (p1 + p2 + p3) / 3;
@@ -1156,28 +1320,30 @@ public:
         AABB_min = XYZ::min(p1, XYZ::min(p2, p3));
     }
     //https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-rendering-a-triangle/moller-trumbore-ray-triangle-intersection.html
-    static decimal intersection_check_MoTru(const PackagedTri& T, const XYZ& position, const XYZ& slope){
+    static XYZ intersection_check_MoTru(const PackagedTri& T, const XYZ& position, const XYZ& slope){
         XYZ pvec = XYZ::cross(slope,T.p1p3);
         decimal det = XYZ::dot(T.p1p2,pvec);
         // if the determinant is negative, the triangle is 'back facing'
         // if the determinant is close to 0, the ray misses the triangle
-        if (det < kEpsilon) return -1;
+        if (det < kEpsilon) return XYZ(- 1);
         // ray and triangle are parallel if det is close to 0
         //if (fabs(det) < kEpsilon) return -1;
         decimal invDet = 1 / det;
 
         XYZ tvec = position - T.p1;
         decimal u = XYZ::dot(tvec,pvec) * invDet;
-        if (u < 0 || u > 1) return -1;
+        if (u < 0 || u > 1) return XYZ(- 1);
 
         XYZ qvec = XYZ::cross(tvec,T.p1p2);
         decimal v = XYZ::dot(slope,qvec) * invDet;
-        if (v < 0 || u + v > 1) return -1;
+        if (v < 0 || u + v > 1) return XYZ(- 1);
 
         decimal t = XYZ::dot(T.p1p3,qvec) * invDet;
-        return t;
+        decimal U = u * T.U_delta.X + v * T.V_delta.X + T.UV_basis.X;
+        decimal V = u * T.U_delta.Y + v * T.V_delta.Y + T.UV_basis.Y;
+        return XYZ(t,U,V);
     }
-    static decimal intersection_check(const PackagedTri& T, const XYZ& position, const XYZ& slope) {
+    static XYZ intersection_check(const PackagedTri& T, const XYZ& position, const XYZ& slope) {
         return intersection_check_MoTru(T, position, slope);
     }
     static XYZ get_normal(XYZ normal, XYZ position) {
@@ -1185,7 +1351,7 @@ public:
     }
     PackagedTri pack() {
         return PackagedTri(
-            p1, p2, p3, material
+            p1, p2, p3, UV_1, UV_2, UV_3, material
         );
     }
 };
@@ -1434,7 +1600,7 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
         np2 += origin;
         np3 += origin;
         return PackagedTri(
-            np1, np2, np3, t.material
+            np1, np2, np3, t.UV_1, t.UV_2, t.UV_3, t.material
         );
     }
     Tri transformT(Tri& t, Transformation T, XYZ origin, XYZ scale) {
@@ -1451,7 +1617,7 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
         np2 += origin;
         np3 += origin;
         return Tri(
-            np1, np2, np3, t.material
+            np1, np2, np3, t.UV_1, t.UV_2, t.UV_3 , t.material
         );
     }
 }
@@ -1548,7 +1714,7 @@ public:
         primitive_count++;
         sphere->material->prep();
         spheres.push_back(sphere);
-        if (sphere->material->emission > 0) {
+        if (sphere->material->emissive.getSingle(0,0) > 0) {
             pointlike_lights.push_back(new PointLikeLight(sphere->origin, sphere->radius,(Primitive*)sphere));
         }
     }
@@ -1681,7 +1847,7 @@ public:
         vector<Tri*>* contents;
         WorkPacket(BVH* t, vector<Tri*>* c) : target(t), contents(c) {}
     };
-    void construct(vector<Tri*>* initial_geo) {
+    int construct(vector<Tri*>* initial_geo) {
         queue<WorkPacket> packets;
         assertm((initial_geo->size() > 0), "BVH was creation was attempted with zero geometry. Did everything load right?");
         auto initial_packet = WorkPacket(this,initial_geo);
@@ -1747,7 +1913,7 @@ public:
             delete geo;
             packets.pop();
         }
-        cout << "BVH leaf count: " << i << endl;
+        return i;
     }
     pair<vector<BVH*>*,vector<Tri*>*> flatten(int depth = 0) {
         vector<BVH*>* l = new vector<BVH*>();
@@ -2101,8 +2267,9 @@ template <typename T, int max_size> struct DataBlock {
 
 struct CastResults {
     XYZ normal;
-    const Material* material;
+    Material* material;
     decimal distance;
+    XYZ UV = XYZ(-1);
     CastResults() : normal(XYZ()), material(nullptr), distance(999999999999999) {};
     CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat), distance(9999999999999) {}
 };
@@ -2224,18 +2391,28 @@ public:
         for (auto PLL : scene->pointlike_lights) {
             lights.push_back(*PLL);
         }
-        cout << "constructing BVH....." << flush;
+        auto BVH_con_start = chrono::high_resolution_clock::now();
+        cout << padString("[BVH] Constructing",".",100) << flush;
         test_bvh->construct(new vector<Tri*>(tris));
+        auto BVH_con_end = chrono::high_resolution_clock::now();
+        cout << "[Done]["<<chrono::duration_cast<chrono::milliseconds>(BVH_con_end-BVH_con_start).count() << "ms]" << endl;
+
+        auto BVH_prep_start = chrono::high_resolution_clock::now();
+        cout << padString("[BVH] Prepping", ".", 100) << flush;
         test_bvh->prep();
+        auto BVH_prep_end = chrono::high_resolution_clock::now();
+        cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_prep_end - BVH_prep_start).count() << "ms]" << endl;
+
+        auto BVH_collapse_start = chrono::high_resolution_clock::now();
+        cout << padString("[BVH] Flattening", ".", 100) << flush;
         auto collapse_out = PackagedBVH::collapse(test_bvh);
         flat_bvh = collapse_out.first;
         flat_bvh_tris = collapse_out.second;
-        int lcf = 0;
-        int lcr = 0;
-        cout << lcf << " " << lcr << endl;
-        cout << "done" << endl;
+        auto BVH_collapse_end = chrono::high_resolution_clock::now();
+        cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_collapse_end - BVH_collapse_start).count() << "ms]" << endl;
+
     }
-    void navRawBVH(const BVH* bvh, CastResults& res,const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+    /*void navRawBVH(const BVH* bvh, CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
         if (bvh->c1 != nullptr) {
             decimal t1 = BVH::intersection(bvh->c1->max,bvh->c1->min,position, inv_slope);
             decimal t2 = BVH::intersection(bvh->c2->max,bvh->c2->min,position, inv_slope);
@@ -2278,7 +2455,7 @@ public:
                 }
             }
         }
-    }
+    }*/
     void iterativeBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
         int stack[64];
         int stack_index = 0;
@@ -2327,12 +2504,13 @@ public:
             else {
                 for (int i = 0; i < current.leaf_size; i++) {
                     const PackagedTri& t = (*flat_bvh_tris)[i+current.index];
-                    decimal distance = Tri::intersection_check(t, position, slope);
-                    if (distance >= 0) {
-                        if (distance < res.distance) {
-                            res.distance = distance;
+                    XYZ distance = Tri::intersection_check(t, position, slope);
+                    if (distance.X >= 0) {
+                        if (distance.X < res.distance) {
+                            res.distance = distance.X;
                             res.normal = Tri::get_normal(t.normal, position);
                             res.material = t.material;
+                            res.UV = distance;
                         }
                     }
                 }
@@ -2445,10 +2623,10 @@ public:
             }
         }
         for (const PackagedTri& t : tri_data) {
-            decimal distance = Tri::intersection_check(t, position, slope);
-            if (distance >= 0) {
-                if (distance < returner.distance) {
-                    returner.distance = distance;
+            XYZ distance = Tri::intersection_check(t, position, slope);
+            if (distance.X >= 0) {
+                if (distance.X < returner.distance) {
+                    returner.distance = distance.X;
                     returner.normal = Tri::get_normal(t.normal,position);
                     returner.material = t.material;
                 }
@@ -2472,28 +2650,49 @@ public:
             (*ray_data.output) += ray_data.coefficient * XYZ(0, 0, 0);
         }
         else {
-            
+            MaterialSample material = results.material->sample_UV(results.UV.Y,results.UV.Z);
+            XYZ normal = results.normal;
+            if (!XYZ::equals(XYZ(0, 0, 0), material.normal)) {
+                normal = material.normal;
+            }
+            if (DRAW_UV) {
+                if (results.UV.X != -1) {
+                    XYZ color;
+                    color.X = results.UV.Y;
+                    color.Y = results.UV.Z;
+                    color.Z = 1 - color.X - color.Y;
+                    (*ray_data.output) += color * 1;
+                    return;
+                }
+            }
+            if (DRAW_NORMAL) {
+                (*ray_data.output) += normal;
+                return;
+            }
+            if (DRAW_COLOR) {
+                (*ray_data.output) += material.color;
+                return;
+            }
+
+            (*ray_data.output) += ray_data.coefficient * material.calculate_emissions();
             if (!ray_data.check_lighting) {
-                (*ray_data.output) += ray_data.coefficient * results.material->calculate_emissions();
+                (*ray_data.output) += ray_data.coefficient * material.calculate_emissions();
             }
             int bounce_count = ray_data.monte_diffuse;
             int shadow_count = ray_data.monte_shadow;
             XYZ flipped_output = XYZ::flip(ray_data.slope);
-            XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), results.normal);
-            Quat normal_rot = Quat::makeRotation(XYZ(0, 1, 0), results.normal);
+            XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), normal);
+            Quat normal_rot = Quat::makeRotation(XYZ(0, 1, 0), normal);
             Quat reflection_rot = Quat::makeRotation(XYZ(0,1,0),reflection_slope);
             Matrix3x3 normal_rot_m = Matrix3x3::quatToMatrix(normal_rot);
             Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
             //ray_data.PreLL.value = XYZ(0, 0, 100);
             
-            if (FULL_BRIGHT) {
-                (*ray_data.output)+= results.material->color;
-            }
             if (ray_data.remaining_bounces > 0) {
                 if (ray_data.remaining_monte_carlo > 0) {
-                    for (int i = 0; i < bounce_count/2; i++) {
-                        XYZ diffuse_slope = results.material->diffuse_bounce(normal_rot_m);
-                        XYZ return_coefficient = ray_data.coefficient * results.material->diffuse_BRDF(XYZ::dot(results.normal,diffuse_slope));
+                    for (int i = 0; i < bounce_count; i++) {
+                        XYZ diffuse_slope = material.diffuse_bounce(normal_rot_m);
+                        XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal,diffuse_slope));
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
                             continue;
                         }
@@ -2512,13 +2711,13 @@ public:
                         process_ray(stats, ray);
                         stats.diffuses_cast++;
                     }
-                    for (int i = 0; i < bounce_count / 2; i++) {
-                        XYZ specular_slope = results.material->reflective_bounce(reflection_rot_m);
-                        XYZ return_coefficient = ray_data.coefficient * results.material->specular_BRDF(results.normal, specular_slope, flipped_output);
+                    for (int i = 0; i < 0; i++) {
+                        XYZ specular_slope = material.reflective_bounce(reflection_rot_m);
+                        XYZ return_coefficient = ray_data.coefficient * material.specular_BRDF(normal, specular_slope, flipped_output);
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
                             continue;
                         }
-                        return_coefficient = specular_slope / (bounce_count/2);
+                        return_coefficient = return_coefficient / (bounce_count/2);
                         auto ray = PackagedRay(
                             ray_data.position + NEAR_THRESHOLD * results.normal * 1.1,
                             specular_slope,
@@ -2535,7 +2734,7 @@ public:
                     }
                 }
                 else {
-                    XYZ return_coefficient = ray_data.coefficient * results.material->fast_BRDF_co(results.normal, reflection_slope, flipped_output);
+                    XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, reflection_slope, flipped_output);
                     if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
                         return;
                     }
@@ -2568,41 +2767,22 @@ public:
                     for (int i = 0; i < shadow_count; i++) {
                         XYZ cast_slope;
                         if (shadow_count > 1) {
-                            
-                            //cast_slope = light_slope+ XYZ(fRand(-0.1, 0.1), fRand(-0.1, 0.1), fRand(-0.1, 0.1));
-                            //cast_slope.normalize();
-                            
                             cast_slope = Matrix3x3::aligned_random(half_arc, light_rot_m);
                         }
                         else {
                             cast_slope = light_slope;
                         }
-                        XYZ return_coefficient = light_falloff_coefficient * results.material->fast_BRDF_co(results.normal, cast_slope, flipped_output);
+                        XYZ return_coefficient = light_falloff_coefficient * material.fast_BRDF_co(normal, cast_slope, flipped_output);
                         if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
                             continue;
                         }
                         if (shadow_count > 1) {
                             return_coefficient = return_coefficient / (shadow_count);
                         }
-                        /*
-                        auto ray = PackagedRay(
-                            ray_data.position + NEAR_THRESHOLD * results.normal * 4,
-                            cast_slope,
-                            return_coefficient,
-                            ray_data.output,
-                            0,//ray_data.remaining_bounces-1,
-                            0,
-                            0,
-                            200,
-                            false
-                        );
-                        //enqueue_ray(ray);
-                        process_ray(stats, ray);
-                        */
                         XYZ start_position = ray_data.position + NEAR_THRESHOLD * results.normal * 1.1;
                         CastResults res = execute_ray_cast(start_position, cast_slope);
                         if (res.material != nullptr) {
-                            *ray_data.output += return_coefficient * res.material->calculate_emissions();
+                            *ray_data.output += return_coefficient * res.material->emissive.getXYZ(res.UV.X,res.UV.Y);
                             //output += return_coefficient * res.material->calculate_emissions();
                         }
                       
@@ -2938,7 +3118,7 @@ public:
 
         render_start = chrono::high_resolution_clock::now();
         prep();
-        enqueue_rays();
+        //enqueue_rays();
         GUI.create_window();
         prepGUI();
         cout <<endl << "+RAYCASTING+" << endl;
@@ -2951,7 +3131,7 @@ public:
     
 private:
     void prep() {
-        cout << "Prepping.........." << flush;
+        cout << endl << "+PREPROCESSING+" << endl;
 
         auto prep_start = chrono::high_resolution_clock::now();
 
@@ -2971,7 +3151,7 @@ private:
         
         auto prep_end = chrono::high_resolution_clock::now();
 
-        cout << "Done [" << chrono::duration_cast<chrono::milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
+        cout << "Preprocessing done [" << chrono::duration_cast<chrono::milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
 
     }
     void prepGUI() {
@@ -2985,10 +3165,10 @@ private:
 
         XYZ start_position = emit_coord;
         XYZ starting_coefficient = XYZ(1, 1, 1)/current_samples_per_pixel;
-        int max_bounces = 2;
-        int monte_bounce_count = 2;
-        int diffuse_emit_count = 256/current_samples_per_pixel;
-        int lighting_emit_count = 256/current_samples_per_pixel;
+        int max_bounces = 1;
+        int monte_bounce_count = 1;
+        int diffuse_emit_count = 1024/current_samples_per_pixel;
+        int lighting_emit_count = 0/current_samples_per_pixel;
 
         
         for (int i_y = 0; i_y < y_increment; i_y++) {
@@ -3156,6 +3336,7 @@ public:
     static Mesh* loadObj(ifstream& file, Material* mat) {
         Mesh* mesh = new Mesh();
         vector<XYZ> verts;
+        vector<XY> UV_coords;
         for (std::string line; getline(file, line);){
             string line_type = line.substr(0, line.find(" "));
             vector<string> words = split_string(line, ' ');
@@ -3176,11 +3357,35 @@ public:
                     ));
                 //cout << verts.back() << endl;
             }
+            if (line_type == "vt") {
+                UV_coords.push_back(XY(
+                    stod(words[1]), stod(words[2])
+                ));
+            }
             if (line_type == "f") {
-                int i0 = stoi(words[1])-1;
-                int i1 = stoi(words[2])-1;
-                int i2 = stoi(words[3])-1;
-                Tri f = Tri(verts[i0], verts[i1], verts[i2], mat);
+                vector<string> sub_words_1 = split_string(words[1], '/');
+                vector<string> sub_words_2 = split_string(words[2], '/');
+                vector<string> sub_words_3 = split_string(words[3], '/');
+                int v_i0 = stoi(sub_words_1[0])-1;
+                int v_i1 = stoi(sub_words_2[0])-1;
+                int v_i2 = stoi(sub_words_3[0])-1;
+                XY  vt1 = XY(-1,-1);
+                XY  vt2 = XY(-1,-1);
+                XY  vt3 = XY(-1,-1);
+                if (sub_words_1.size() > 1) {
+                    if (sub_words_1[1] != "") {
+                        int vt_i0 = stoi(sub_words_1[1]) - 1;
+                        int vt_i1 = stoi(sub_words_2[1]) - 1;
+                        int vt_i2 = stoi(sub_words_3[1]) - 1;
+                        vt1 = UV_coords[vt_i0];
+                        vt2 = UV_coords[vt_i1];
+                        vt3 = UV_coords[vt_i2];
+                    }
+                }
+                Tri f = Tri(
+                    verts[v_i0], verts[v_i1], verts[v_i2],
+                    vt1, vt2, vt3,
+                    mat);
                 mesh->addTri(f);
             }
         }
@@ -3277,129 +3482,98 @@ SceneManager* load_default_scene() {
     Scene* scene = new Scene();
 
     Lens* lens = new RectLens(1, 1);
-    Camera* camera = new Camera(scene, XYZ(0, -0.3, -2), lens , XYZ(0,0,-2));
-
-
-    vector<Sphere*> spheres;
-    int n_sphere = 0;
-    decimal max_pos = 7;
-    decimal min_radius = 0.3;
-    decimal max_radius = 1;
-    for (int i = 0; i < n_sphere; i++) {
-        decimal radius = fRand(min_radius, max_radius);
-        decimal x = fRand(-max_pos, max_pos);
-        decimal y = fRand(-max_pos, max_pos);
-        decimal z = fRand(-max_pos, max_pos);
-        decimal r = fRand(0, 1);
-        decimal g = fRand(0, 1);
-        decimal b = fRand(0, 1);
-        XYZ origin = XYZ(x, y, z);
-        Material* mat = new Material(XYZ(r, g, b));
-        mat->roughness = 1;
-        Sphere* sphere =new Sphere(radius, origin, mat);
-        spheres.push_back(sphere);
-
-    }
+    Camera* camera = new Camera(scene, XYZ(0, -0.3, -2), lens , XYZ(0,0,-4));
 
     Material* sphere_mat = new Material();
-    sphere_mat->color = XYZ(0.2, 0.2, 1);//XYZ(0.24725, 0.1995, 0.0745);
-    sphere_mat->specular = 0;
-    sphere_mat->metallic = 1;
-    sphere_mat->roughness = 0.2;
+    sphere_mat->color.set_static(XYZ(0.2, 0.2, 1));//XYZ(0.24725, 0.1995, 0.0745);
+    sphere_mat->specular.set_static(0);
+    sphere_mat->metallic.set_static(1);
+    sphere_mat->roughness.set_static(0.2);
     Sphere* my_sphere =new Sphere(1, XYZ(0, 0, 0), sphere_mat);
 
     Material* sphere_2_mat = new Material();
-    sphere_2_mat->color = XYZ(1, 0.5, 0.5);//XYZ(0.24725, 0.1995, 0.0745);
-    sphere_2_mat->specular = 0;
-    sphere_2_mat->metallic = 0;
-    sphere_2_mat->roughness = 1;
+    sphere_2_mat->color.set_static(XYZ(1, 0.5, 0.5));//XYZ(0.24725, 0.1995, 0.0745);
+    sphere_2_mat->specular.set_static(0);
+    sphere_2_mat->metallic.set_static(0);
+    sphere_2_mat->roughness.set_static(1);
     Sphere* my_sphere_2 = new Sphere(0.4, XYZ(-0.9, -0.6, -0.7), sphere_2_mat);
     //Sphere* my_sphere_2 = new Sphere(0.4, XYZ(0, -0.6, 0.5), sphere_2_mat);
 
     Material* tri_mat = new Material();
-    tri_mat->color = XYZ(1, 0.5, 1);//XYZ(0.24725, 0.1995, 0.0745);
-    tri_mat->specular = 0.8;
-    tri_mat->metallic = 0;
-    tri_mat->roughness = 0.05;
+    tri_mat->color.set_static(XYZ(1, 0.5, 1));//XYZ(0.24725, 0.1995, 0.0745);
+    tri_mat->specular.set_static(0.8);
+    tri_mat->metallic.set_static(0);
+    tri_mat->roughness.set_static(0.05);
     Tri* my_tri = new Tri(XYZ(3, -0.7, -3), XYZ(0, 3, 0), XYZ(-3, -0.7, 3), tri_mat);
 
     Material* light_mat = new Material();
-    light_mat->color = XYZ(1, 1, 1);
-    light_mat->emission = 5000;
-    light_mat->emissive_color = XYZ(1, 1, 1);
+    light_mat->color.set_static(XYZ(1, 1, 1));
+    light_mat->emissive.set_static(200*XYZ(1,1,1));
     //light_mat.emissive_color = XYZ(1, 0.662, 0.341);
     Sphere* glow_sphere =new Sphere(1, XYZ(-3, 2, 0), light_mat);
 
 
     Material* floor_mat = new Material();
-    floor_mat->color = XYZ(1, 1, 1);
-    floor_mat->roughness = 0.25;
-    floor_mat->metallic = 0;
-    floor_mat->specular = 0.5;
+    floor_mat->color.set_static(XYZ(1, 1, 1));
+    floor_mat->roughness.set_static(0.25);
+    floor_mat->metallic.set_static(0);
+    floor_mat->specular.set_static(0.5);
     Plane* floor =new Plane(XYZ(0, 1, 0), XYZ(0, -1, 0), floor_mat);
 
     Material* mesh_mat = new Material();
-    mesh_mat->color = XYZ(1, 0.2, 0.2);
+    string path = "C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\";
+    mesh_mat->color.set_static(XYZ(1, 0.2, 0.2));
+    //mesh_mat->color.set_static(XYZ(1, 1, 1));
+
+    //mesh_mat->color.set_texture(path+"color.bmp");
     //mesh_mat->color = XYZ(1);
-    mesh_mat->roughness = 0.2;
-    mesh_mat->specular = 0.5;
-    mesh_mat->metallic = 0;
+    mesh_mat->roughness.set_static(0.2);
+    //mesh_mat->roughness.set_texture(path+"roughness.bmp");
+    mesh_mat->specular.set_static(1);
+    //mesh_mat->specular.set_texture(path+"specular.bmp");
+    mesh_mat->metallic.set_static(0);
+    //mesh_mat->normal.set_texture(path + "normal_8k.png");
+    // 
     //Mesh* mesh = FileManager::loadTriFile("C:\\Users\\Charlie\\Documents\\RobotLab.tri", mesh_mat);
-    Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\mike.obj", mesh_mat);
+    Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\head_rust.obj", mesh_mat);
     //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\lowfumo.obj",mesh_mat);
     Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
     m_obj->addMesh(mesh);
    // m_obj->applyTransformXYZ(1, 0, 2);
     m_obj->applyTransformXYZ(0, 0, 2);
     m_obj->rotateX(0);
-    m_obj->rotateY(PI / 4);
+    //m_obj->rotateY(PI / 4);
     m_obj->rotateZ(0);
 
     //scene->register_sphere(my_sphere);
     //scene->register_sphere(my_sphere_2);
     //scene->register_tri(my_tri);
     scene->register_sphere(glow_sphere);
-    scene->register_plane(floor);
+    //scene->register_plane(floor);
     scene->register_object(m_obj);
-    for (int i = 0; i < spheres.size(); i++) {
-        scene->register_sphere(spheres.at(i));
-    }
 
     SceneManager* SM = new SceneManager(camera, scene);
 
     return SM;
 }
 
-
-
-int main()
-{
-    cout << std::numeric_limits<float>::epsilon() << endl;
-    srand(0);
-
-    xe_seed[0] = rand();
-    xe_seed[1] = rand();
-    xe_seed[2] = rand();
-    xe_seed[3] = rand();
-
-    
+void benchmark() {
     XYZ direction = XYZ(1, 1, 0);
     direction.normalize();
 
-    Quat rot = Quat::makeRotation(XYZ(0,1,0),direction);
+    Quat rot = Quat::makeRotation(XYZ(0, 1, 0), direction);
     Matrix3x3 rot_m = Matrix3x3::quatToMatrix(rot);
 
     cout << "A::-1::-1::-1::0::2::A::1::0::0::0::0;" << endl;
     cout << "A::1::1::1::0::2::A::1::0::0::0::0;" << endl;
-    for (float i = -PI/2; i <= PI/2; i += PI / 100) {
+    for (float i = -PI / 2; i <= PI / 2; i += PI / 100) {
         //cout << "(" << i << "," << Scos(i) << ")" << endl;
     }
-    
+
     //exit(0);
-    
-    int count = pow(10,8);
+
+    int count = pow(10, 8);
     XYZ out = XYZ();
-    VecLib::prep();
     int num = 512;
     float t_c_e = 0;
     float t_s_e = 0;
@@ -3407,8 +3581,8 @@ int main()
     float t_s_e_a = 0;
     for (int i = 0; i < num; i++) {
         float f = (float)i / num;
-        float c_error = VecLib::Lcos(f)-cos(f);
-        float s_error = VecLib::Lsin(f)-sin(f);
+        float c_error = VecLib::Lcos(f) - cos(f);
+        float s_error = VecLib::Lsin(f) - sin(f);
         t_c_e += c_error;
         t_s_e += s_error;
         t_c_e_a += abs(c_error);
@@ -3429,7 +3603,7 @@ int main()
     }
     auto end_2 = chrono::high_resolution_clock::now();
     auto start_3 = chrono::high_resolution_clock::now();
-    for (int i = 0; i < count*2;i+=2) {
+    for (int i = 0; i < count * 2;i += 2) {
         //out+= XYZ::test_slope(XYZ::random(100), XYZ::random(100));
     }
     auto end_3 = chrono::high_resolution_clock::now();
@@ -3444,8 +3618,8 @@ int main()
     }
     auto end_5 = chrono::high_resolution_clock::now();
     cout << out << endl;
-    cout << intToEng((double)count/chrono::duration_cast<chrono::milliseconds>(end_1 - start_1).count()*1000) << "/s" << endl;
-    cout << intToEng((double)count/chrono::duration_cast<chrono::milliseconds>(end_2 - start_2).count()*1000) << "/s" << endl;
+    cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_1 - start_1).count() * 1000) << "/s" << endl;
+    cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_2 - start_2).count() * 1000) << "/s" << endl;
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_3 - start_3).count() * 1000) << "/s" << endl;
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_4 - start_4).count() * 1000) << "/s" << endl;
     cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_5 - start_5).count() * 1000) << "/s" << endl;
@@ -3459,15 +3633,9 @@ int main()
     }
     */
     //exit(0);
-    
+}
 
-    //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
-    
-    //GUI->hold_window();
-    PackagedBVH pbvh = PackagedBVH(new BVH());
-    cout << "asdfasdfasdf   " << sizeof(pbvh) << endl;
-    SceneManager* scene_manager = load_default_scene();
-    scene_manager->render(640*1.6,640*1.6,8);
+void post_bench() {
     /*auto l = scene_manager->RE.test_bvh->flatten(-1);
     cout << l.first->size() << endl;
     string out_s = "join(";
@@ -3515,6 +3683,26 @@ int main()
     //exit(0);
     //scene_manager->render(1920 / 10, 1080 / 10, 1);
     */
+}
+int main()
+{
+    srand(0);
+
+    xe_seed[0] = rand();
+    xe_seed[1] = rand();
+    xe_seed[2] = rand();
+    xe_seed[3] = rand();
+
+    VecLib::prep();
+    
+    
+
+    //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
+    
+    //GUI->hold_window();
+    SceneManager* scene_manager = load_default_scene();
+    scene_manager->render(640*1.6,640*1.6,8);
+    
     cout << endl << "writing out raw......." << flush;
     FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
     cout << "done" << endl;
