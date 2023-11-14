@@ -1612,25 +1612,13 @@ public:
     XYZ scale;
     vector<Transformation> transformations;
     
-    vector<Object> children;
-    
     vector<Mesh*> meshes;
-    vector<Sphere*> spheres;
-    vector<Plane*> planes;
-
-
     Object(XYZ _origin, XYZ _scale):
         origin(_origin), scale(_scale){
         
     }
     void addMesh(Mesh* M) {
         meshes.push_back(M);
-    }
-    void addSphere(Sphere* S) {
-        spheres.push_back(S);
-    }
-    void addPlane(Plane* P) {
-        planes.push_back(P);
     }
     void prep() {
         for (Mesh* m : meshes) {
@@ -1709,7 +1697,63 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
     }
 }
 
+class Scene {
+public:
+    
+    //Im trying something here. Im going to organize objects into groups, and then explicitly process each one when casting. Pain the ass for me, but in theory it makes for cleaner execution and code.
+    //my justification here is that polymorphism can make for some really just nasty fucking code. Doing this will force me to make more modular code and more explicit optimizations.
+    //C++ just wasnt made to be flexible :(
 
+    int object_count = 0;
+    int primitive_count = 0;
+    vector<Sphere*> spheres;
+    vector<Plane*> planes;
+    vector<Tri*> tris;
+    vector<Object*> objects;
+
+    vector<PointLikeLight*> pointlike_lights;
+
+    int current_resolution_x;
+    int current_resolution_y;
+    Scene() {}
+    
+    void register_sphere(Sphere* sphere) {
+        object_count++;
+        primitive_count++;
+        sphere->material->prep();
+        spheres.push_back(sphere);
+        if (sphere->material->emissive.getSingle(0,0) > 0) {
+            pointlike_lights.push_back(new PointLikeLight(sphere->origin, sphere->radius,(Primitive*)sphere));
+        }
+    }
+
+    void register_plane(Plane* plane) {
+        object_count++;
+        primitive_count++;
+        plane->material->prep();
+        planes.push_back(plane);
+    }
+
+    void register_tri(Tri* tri) {
+        object_count++;
+        primitive_count++;
+        tri->material->prep();
+        tris.push_back(tri);
+    }
+
+    void register_object(Object* obj) {
+        object_count++;
+        for (Mesh* M: obj->meshes) {
+            M->prep();
+            primitive_count+=M->primitive_count;
+        }
+        objects.push_back(obj);
+    }
+
+    
+private:
+    
+};
 
 //http://bannalia.blogspot.com/2015/06/cache-friendly-binary-search.html
 int tree_total = 0;
@@ -2406,65 +2450,6 @@ struct Casting_Diagnostics {
     chrono::nanoseconds duration;
 };
 
-class Scene {
-public:
-
-    //Im trying something here. Im going to organize objects into groups, and then explicitly process each one when casting. Pain the ass for me, but in theory it makes for cleaner execution and code.
-    //my justification here is that polymorphism can make for some really just nasty fucking code. Doing this will force me to make more modular code and more explicit optimizations.
-    //C++ just wasnt made to be flexible :(
-
-    int object_count = 0;
-    int primitive_count = 0;
-    vector<Sphere*> spheres;
-    vector<Plane*> planes;
-    vector<Tri*> tris;
-    vector<Object*> objects;
-
-    vector<Camera*> cameras;
-
-    vector<PointLikeLight*> pointlike_lights;
-
-    int current_resolution_x;
-    int current_resolution_y;
-    Scene() {}
-
-    void register_sphere(Sphere* sphere) {
-        object_count++;
-        primitive_count++;
-        sphere->material->prep();
-        spheres.push_back(sphere);
-        if (sphere->material->emissive.getSingle(0, 0) > 0) {
-            pointlike_lights.push_back(new PointLikeLight(sphere->origin, sphere->radius, (Primitive*)sphere));
-        }
-    }
-
-    void register_plane(Plane* plane) {
-        object_count++;
-        primitive_count++;
-        plane->material->prep();
-        planes.push_back(plane);
-    }
-
-    void register_tri(Tri* tri) {
-        object_count++;
-        primitive_count++;
-        tri->material->prep();
-        tris.push_back(tri);
-    }
-
-    void register_object(Object* obj) {
-        object_count++;
-        for (Mesh* M : obj->meshes) {
-            M->prep();
-            primitive_count += M->primitive_count;
-        }
-        objects.push_back(obj);
-    }
-
-
-private:
-
-};
 
 class RayEngine {
 public:
