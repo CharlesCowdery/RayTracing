@@ -880,9 +880,9 @@ namespace VecLib {
         __m256 c1 = _mm256_mul_ps(v1.Z, v2.Y);
         __m256 c2 = _mm256_mul_ps(v1.X, v2.Z);
         __m256 c3 = _mm256_mul_ps(v1.Y, v2.X);
-        output.X = _mm256_fmaddsub_ps(v1.Y, v2.Z, c1);
-        output.Y = _mm256_fmaddsub_ps(v1.Z, v2.X, c2);
-        output.Z = _mm256_fmaddsub_ps(v1.X, v2.Y, c3);
+        output.X = _mm256_fmsub_ps(v1.Y, v2.Z, c1);
+        output.Y = _mm256_fmsub_ps(v1.Z, v2.X, c2);
+        output.Z = _mm256_fmsub_ps(v1.X, v2.Y, c3);
     }
     void dot_avx(const m256_vec3& v1, const m256_vec3& v2, __m256& output) {
         output = _mm256_fmadd_ps(
@@ -1658,8 +1658,8 @@ struct PTri_AVX { //literally 0.7kB of memory. What have I done.
         __m256 dot;
         m256_vec3 relative_position;
         m256_vec3::sub(position, T.origin_offset, relative_position);
-        __m256 sgn = VecLib::sgn_fast(dot);
         VecLib::dot_avx(T.normal, relative_position, dot); //this can probably be done faster via xor of sign bit rather than multiplication, but whatever
+        __m256 sgn = VecLib::sgn_fast(dot);
         output.X = _mm256_mul_ps(
             T.normal.X,
             sgn
@@ -2297,6 +2297,25 @@ public:
     float avg_path() const {
         if (c1 == nullptr) return 0;
         return (c1->avg_path() + c2->avg_path()) / 2.0;
+    }
+    vector<PackagedTri> get_emissive_tris() {
+        vector<PackagedTri> out;
+        get_emissive_tris(out);
+        return out;
+    }
+    void get_emissive_tris(vector<PackagedTri>& vec) {
+        if (c1 != nullptr) {
+            c1->get_emissive_tris(vec);
+            c2->get_emissive_tris(vec);
+        }
+        else {
+            for (int i = 0; i < elements.size(); i++) {
+                Tri* t = elements[i];
+                if (t->material->emissive.getXYZ(0, 0).magnitude() > 0) {
+                    vec.push_back(t->pack());
+                }
+            }
+        }
     }
     
 private:
@@ -3148,7 +3167,7 @@ public:
     vector<PackagedTri> tri_data;
     vector<PTri_AVX> avx_tri_data;
     vector<PointLikeLight> lights;
-    vector<PackagedTri*> emissive_tris;
+    vector<PackagedTri> emissive_tris;
     PackagedBVH* flat_bvh = nullptr;
     vector<BVH_AVX> avx_bvh;
     short monte_carlo_generations = 2;
@@ -3246,6 +3265,9 @@ public:
             cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_con_end - BVH_con_start).count() << "ms]" << endl;
             auto BVH_collapse_start = chrono::high_resolution_clock::now();
             cout << padString("[BVH] Flattening", ".", 100) << flush;
+
+            PS->emissive_tris = bvh->get_emissive_tris();
+
 #if USE_AVX_BVH
             auto collapse_out = BVH_AVX::collapse(bvh);
             PS->avx_bvh = *collapse_out.first;
@@ -3366,6 +3388,40 @@ public:
                     tri_count[stack_index] = current.leaf_size[selection_index];
                     
                 }
+                //float temp[8];
+                //for (int i = 0; i < 8; i++) {
+                //    temp[i] = results[i];
+                //}
+                //for (int i = 7; i >= 1; i--) {
+                //    for (int j = i; j >= 1; j--) {
+                //        float j1 = temp[j];
+                //        float j2 = temp[j - 1];
+                //        if (j1 < j2) {
+                //            temp[j - 1] = j1;
+                //            temp[j] = j2;
+                //        }
+                //    }
+                //}
+                //
+                //for (int i = 7; i >= 0; i--) {
+                //    float dist2 = temp[i];
+                //    int index = 0;
+                //    if (dist2 <= 0) {
+                //        break;
+                //    }
+                //    for (int k = 7; k >= 0; k--) {
+                //        if (results[k] == dist2) {
+                //            index = k;
+                //            results[k] = -1;
+                //            break;
+                //        }
+                //    }
+                //    stack_index++;
+                //    stack[stack_index] = current.indexes[index];
+                //    distances[stack_index] = dist2;
+                //    tri_count[stack_index] = current.leaf_size[index];
+                //
+                //}
             }
             else {
                 int start_index = stack[stack_index];
@@ -3584,7 +3640,7 @@ public:
             (*ray_data.output) += ray_data.coefficient * XYZ(0);
         }
         else {
-            MaterialSample material = results.material->sample_UV(results.UV.Y,results.UV.Z);
+            MaterialSample material = results.material->sample_UV(results.UV.Y, results.UV.Z);
             XYZ normal = results.normal;
             if (!XYZ::equals(XYZ(0, 0, 0), material.normal)) {
                 normal = material.normal;
@@ -3601,7 +3657,7 @@ public:
                 }
             }
             if (DRAW_NORMAL) {
-                (*ray_data.output) += ray_data.coefficient*(normal/2+XYZ(0.5,0.5,0.5))*10;
+                (*ray_data.output) += ray_data.coefficient * (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
                 return;
             }
             if (DRAW_COLOR) {
@@ -3622,7 +3678,7 @@ public:
                 //(*ray_data.output) += ray_data.coefficient * (ray_data.position / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
             }
 
-            int bounce_count = data->monte_carlo_max*pow(data->monte_carlo_modifier,ray_data.generation);
+            int bounce_count = data->monte_carlo_max * pow(data->monte_carlo_modifier, ray_data.generation);
             XYZ flipped_output = XYZ::flip(ray_data.slope);
             XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), normal);
 
@@ -3631,78 +3687,77 @@ public:
             Matrix3x3 normal_rot_m = Matrix3x3::quatToMatrix(normal_rot);
             Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
             //ray_data.PreLL.value = XYZ(0, 0, 100);
-            
-            if (ray_data.generation < data->max_generations) {
-                if (ray_data.generation < data->monte_carlo_generations) {
-                    float diffuse_split = 1;
-                    float specular_split = 1 - diffuse_split;
-                    int diffuse_bounces = bounce_count * diffuse_split;
-                    int specular_bounces = bounce_count * specular_split;
-                    if (diffuse_bounces < 4) diffuse_bounces = 4;
-                    int diffuse_Vslices = floor(log2(diffuse_bounces)-1);
-                    int diffuse_Rslices = floor(diffuse_bounces / diffuse_Vslices);
-                    float diffuse_V_increment = 1.0 / diffuse_Vslices;
-                    float diffuse_R_increment = 1.0 / diffuse_Rslices;
-                    diffuse_bounces = diffuse_Vslices * diffuse_Rslices;
-                    float diffuse_V_position = 0;
-                    float diffuse_R_position = 0;
-                    
 
-                    for (int i = 0; i < diffuse_bounces; i++) {
-                        //if (i % diffuse_Rslices == 0 && i != 0) {
-                        //    diffuse_V_position+=diffuse_V_increment;
-                        //}
-                        //diffuse_R_position += diffuse_R_increment;
-                        //if (diffuse_R_position > 1) diffuse_R_position -= 1;
-                        //XYZ diffuse_slope = material.biased_diffuse_bounce(
-                        //    normal_rot_m
-                        //    ,diffuse_V_position
-                        //    ,diffuse_V_position+diffuse_V_increment
-                        //    ,diffuse_R_position
-                        //    ,diffuse_R_position+diffuse_R_increment
-                        //);
-                        XYZ diffuse_slope = material.biased_diffuse_bounce(
-                            normal_rot_m
-                        );
-                        if (DRAW_BOUNCE_DIRECTION) {
-                            if(ray_data.generation==1)
-                                (*ray_data.output) += ray_data.coefficient/diffuse_bounces * (diffuse_slope / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
-                            //continue;
-                        }
-                        
-                        //XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, diffuse_slope, flipped_output);
-                        XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal, diffuse_slope));
-                        if (XYZ::magnitude(return_coefficient)<0.0000001) {
-                            continue;
-                        }
-                        return_coefficient = return_coefficient / bounce_count * diffuse_split;
-                        auto ray = PackagedRay(
-                            ray_data.position + 0.001 * results.normal,
-                            diffuse_slope,
-                            return_coefficient,
-                            ray_data.output,
-                            ray_data.generation+1
-                        );
-                        stats.diffuses_cast++;
-                        process_ray(stats, ray);
+            if (ray_data.generation >= data->max_generations) return;
+            if (ray_data.generation < data->monte_carlo_generations) {                
+                float diffuse_split = 1;
+                float specular_split = 1 - diffuse_split;
+                int diffuse_bounces = bounce_count * diffuse_split;
+                int specular_bounces = bounce_count * specular_split;
+                if (diffuse_bounces < 4) diffuse_bounces = 4;
+                int diffuse_Vslices = floor(log2(diffuse_bounces) - 1);
+                int diffuse_Rslices = floor(diffuse_bounces / diffuse_Vslices);
+                float diffuse_V_increment = 1.0 / diffuse_Vslices;
+                float diffuse_R_increment = 1.0 / diffuse_Rslices;
+                diffuse_bounces = diffuse_Vslices * diffuse_Rslices;
+                float diffuse_V_position = 0;
+                float diffuse_R_position = 0;
+
+
+                for (int i = 0; i < diffuse_bounces; i++) {
+                    //if (i % diffuse_Rslices == 0 && i != 0) {
+                    //    diffuse_V_position+=diffuse_V_increment;
+                    //}
+                    //diffuse_R_position += diffuse_R_increment;
+                    //if (diffuse_R_position > 1) diffuse_R_position -= 1;
+                    //XYZ diffuse_slope = material.biased_diffuse_bounce(
+                    //    normal_rot_m
+                    //    ,diffuse_V_position
+                    //    ,diffuse_V_position+diffuse_V_increment
+                    //    ,diffuse_R_position
+                    //    ,diffuse_R_position+diffuse_R_increment
+                    //);
+                    XYZ diffuse_slope = material.biased_diffuse_bounce(
+                        normal_rot_m
+                    );
+                    if (DRAW_BOUNCE_DIRECTION) {
+                        if (ray_data.generation == 1)
+                            (*ray_data.output) += ray_data.coefficient / diffuse_bounces * (diffuse_slope / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+                        //continue;
                     }
-                }
-                else {
-                    XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, reflection_slope, flipped_output);
-                    if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
-                        return;
+
+                    //XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, diffuse_slope, flipped_output);
+                    XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal, diffuse_slope));
+                    if (XYZ::magnitude(return_coefficient) < 0.0000001) {
+                        continue;
                     }
+                    return_coefficient = return_coefficient / bounce_count * diffuse_split;
                     auto ray = PackagedRay(
-                        ray_data.position + NEAR_THRESHOLD * results.normal * 10,
-                        reflection_slope,
+                        ray_data.position + 0.001 * results.normal,
+                        diffuse_slope,
                         return_coefficient,
                         ray_data.output,
-                        ray_data.generation+1
+                        ray_data.generation + 1
                     );
+                    stats.diffuses_cast++;
                     process_ray(stats, ray);
-
-                    stats.reflections_cast++;
                 }
+            }
+            else {
+                XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, reflection_slope, flipped_output);
+                if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
+                    return;
+                }
+                auto ray = PackagedRay(
+                    ray_data.position + NEAR_THRESHOLD * results.normal * 10,
+                    reflection_slope,
+                    return_coefficient,
+                    ray_data.output,
+                    ray_data.generation + 1
+                );
+                process_ray(stats, ray);
+
+                stats.reflections_cast++;
             }
         }
     }
@@ -5356,7 +5411,7 @@ int main()
     //GUI->hold_window();
     //SceneManager* scene_manager = load_cornell_box();
     SceneManager* scene_manager = FileManager::loadGLTFFile("C:\\Users\\Charlie\\Documents\\models\\Scenes\\cornell.glb");
-    scene_manager->render(640/1, 640/1, 9);
+    scene_manager->render(1080/4, 1080/4, 10);
     
     cout << endl << "writing out raw......." << flush;
     FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
