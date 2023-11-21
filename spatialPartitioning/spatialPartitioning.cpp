@@ -17,8 +17,10 @@
 #include <fstream>
 
 #include <SFML/Graphics.hpp>
-#include <thread>
+#include <OpenColorIO/OpenColorIO.h>
+namespace OCIO = OCIO_NAMESPACE;
 
+#include <thread>
 #include <vector>
 #include <array>
 #include <unordered_set>
@@ -54,6 +56,7 @@
 #define DRAW_COLOR false
 #define DEPTH_VIEW false
 #define DRAW_UV false
+#define DRAW_BOUNCE_DIRECTION false
 #define DRAW_NORMAL false
 #define DRAW_EMISSIVE false
 #define GENERATED_TEXTURE_RESOLUTION 2048
@@ -61,9 +64,20 @@
 #define USE_ADVANCED_BVH false
 
 //defines program precision
-#define LEAF_SIZE 2
 
 #define decimal float
+
+#define USE_AVX_BVH 1
+#define USE_AVX_TRI 1
+
+
+#if USE_AVX_TRI
+#define LEAF_SIZE 8
+#define PENALIZE_UNFILLED_LEAFS 1
+#else
+#define LEAF_SIZE 2
+#define PENALIZE_UNFILLED_LEAFS 0
+#endif
 
 using namespace std;
 using time_point = chrono::steady_clock::time_point;
@@ -302,6 +316,11 @@ struct XY {
 XY operator*(const decimal& self, const XY& coord) {
     return coord * self;
 }
+
+template <typename T> T sign(T& input) {
+    return (T) ((input < 0) ? -1 : 1);
+}
+
 struct XYZ {
 public:
     decimal X;
@@ -310,6 +329,10 @@ public:
     XYZ() : X(0), Y(0), Z(0) {}
     XYZ(decimal s) : X(s), Y(s), Z(s) {}
     XYZ(decimal _X, decimal _Y, decimal _Z) : X(_X), Y(_Y), Z(_Z) {}
+    XYZ(vector<double> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
+    XYZ(vector<float> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
+    XYZ(vector<double> attr, vector<char> swizzle) : X(attr[sign(swizzle[0])*abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
+    XYZ(vector<float> attr, vector<char> swizzle) : X(attr[sign(swizzle[0]) * abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
     XYZ(XY xy, decimal _Z) : X(xy.X), Y(xy.Y), Z(_Z) {}
     XYZ(XY xy) : XYZ(xy, 0) {}
     XYZ(sf::Color c) : XYZ(c.r, c.g, c.b) {}
@@ -325,6 +348,13 @@ public:
         if (n == 0) return X;
         if (n == 1) return Y;
         if (n == 2) return Z;
+    }
+    XYZ swizzle(vector<char> swiz) {
+        return XYZ(
+            sign(swiz[0]) * (*this)[abs(swiz[0])],
+            sign(swiz[1]) * (*this)[abs(swiz[1])],
+            sign(swiz[2]) * (*this)[abs(swiz[2])]
+        );
     }
     void add(decimal addend) {
         X += addend;
@@ -656,6 +686,10 @@ struct Quat : public XYZ {
     Quat(XYZ _XYZ, decimal _W) : XYZ(_XYZ), W(_W) {}
     Quat(decimal _X, decimal _Y, decimal _Z) : XYZ(_X,_Y,_Z), W(0) {}
     Quat(decimal _X, decimal _Y, decimal _Z,decimal _W) : XYZ(_X, _Y, _Z), W(_W) {}
+    Quat(vector<float> attr) : XYZ(attr), W(attr[3]) {}
+    Quat(vector<double> attr) : XYZ(attr), W(attr[3]) {}
+    Quat(vector<float> attr, vector<char> swizzle) : XYZ(attr,swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
+    Quat(vector<double> attr, vector<char> swizzle) : XYZ(attr,swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
     Quat clone() {
         return Quat(X, Y, Z, W);
     }
@@ -678,19 +712,25 @@ struct Quat : public XYZ {
         decimal l = sqrt(d);
         return in / l;
     }
+    static Quat makeRotation_(const XYZ& start, const XYZ& end) {
+        XYZ a = XYZ::cross(start, end);
+        decimal theta = acos(XYZ::dot(start, end));
+
+    }
     static Quat makeRotation(const XYZ& up, const XYZ& direction) {
         if (XYZ::equals(direction, up)) {
             return Quat(0, 0, 0, 1);
         }
+        XYZ a = XYZ::cross(up, direction);
         if (XYZ::equals(direction, XYZ::negative(up))) {
-            return Quat(direction, 0);
+            return Quat(a, 0);
         }
         
         decimal m1 = XYZ::magnitude(up);
         decimal m2 = XYZ::magnitude(direction);
 
         Quat out = Quat(
-            XYZ::cross(up, direction),
+            a,
             sqrt(m1 * m1 * m2 * m2) + XYZ::dot(up, direction)
         );
 
@@ -731,7 +771,80 @@ struct Quat : public XYZ {
     }
 };
 
+struct m256_vec3 {
+    __m256 X;
+    __m256 Y;
+    __m256 Z;
+    m256_vec3() {};
+    m256_vec3(XYZ fill) {
+        X = _mm256_set1_ps(fill.X);
+        Y = _mm256_set1_ps(fill.Y);
+        Z = _mm256_set1_ps(fill.Z);
+    }
+    m256_vec3(vector<XYZ> input) {
+        vector<float> x_vec;
+        vector<float> y_vec;
+        vector<float> z_vec;
+        for (int i = 0; i < 8 && i < input.size(); i++) {
+            x_vec.push_back(input[i].X);
+            y_vec.push_back(input[i].Y);
+            z_vec.push_back(input[i].Z);
+        }
+        while (x_vec.size() < 8) {
+            x_vec.push_back(0);
+            y_vec.push_back(0);
+            z_vec.push_back(0);
+        }
+        X = _mm256_load_ps(x_vec.data());
+        Y = _mm256_load_ps(y_vec.data());;
+        Z = _mm256_load_ps(z_vec.data());;
+    }
+    XYZ at(int i) const {
+        double x = ((float*)&X)[i];
+        double y = ((float*)&Y)[i];
+        double z = ((float*)&Z)[i];
+        return XYZ(x, y, z);
+    }
+    static void sub(const m256_vec3& v1, const m256_vec3& v2, m256_vec3& output) {
+        output.X = _mm256_sub_ps(v1.X, v2.X);
+        output.Y = _mm256_sub_ps(v1.Y, v2.Y);
+        output.Z = _mm256_sub_ps(v1.Z, v2.Z);
+    }
+    static m256_vec3 sub_inline(const m256_vec3& v1, const m256_vec3& v2) {
+        m256_vec3 output;
+        sub(v1, v2, output);
+        return output;
+    }
+};
 
+struct m256_vec2 {
+    __m256 X;
+    __m256 Y;
+    m256_vec2() {};
+    m256_vec2(XY fill) {
+        X = _mm256_set1_ps(fill.X);
+        Y = _mm256_set1_ps(fill.Y);
+    }
+    m256_vec2(vector<XY> input) {
+        vector<float> x_vec;
+        vector<float> y_vec;
+        for (int i = 0; i < 8 && i < input.size(); i++) {
+            x_vec.push_back(input[i].X);
+            y_vec.push_back(input[i].Y);
+        }
+        while (x_vec.size() < 8) {
+            x_vec.push_back(0);
+            y_vec.push_back(0);
+        }
+        X = _mm256_load_ps(x_vec.data());
+        Y = _mm256_load_ps(y_vec.data());;
+    }
+    XY at(int i) const {
+        double x = ((float*)&X)[i];
+        double y = ((float*)&Y)[i];
+        return XY(x, y);
+    }
+};
 
 
 decimal Ssin(decimal theta) {
@@ -752,7 +865,61 @@ decimal sin_lookup[LOOKUP_SIZE_TRIG];
 decimal cos_lookup[LOOKUP_SIZE_TRIG];
 XYZ biased_hemi_lookup[LOOKUP_SIZE_BIASED_HEMI];
 
-namespace VecLib{
+namespace VecLib {
+    __m256 sgn_fast(__m256& x) //credit to Peter Cordes https://stackoverflow.com/a/41353450
+    {
+        __m256 negzero = _mm256_set1_ps(-0.0f);
+
+        // using _mm_setzero_ps() here might actually be better without AVX, since xor-zeroing is as cheap as a copy but starts a new dependency chain
+        //__m128 nonzero = _mm_cmpneq_ps(x, negzero);  // -0.0 == 0.0 in IEEE floating point
+
+        __m256 x_signbit = _mm256_and_ps(x, negzero);
+        return _mm256_or_ps(_mm256_set1_ps(1.0f), x_signbit);
+    }
+    void cross_avx(const m256_vec3& v1,const m256_vec3& v2, m256_vec3& output) {
+        __m256 c1 = _mm256_mul_ps(v1.Z, v2.Y);
+        __m256 c2 = _mm256_mul_ps(v1.X, v2.Z);
+        __m256 c3 = _mm256_mul_ps(v1.Y, v2.X);
+        output.X = _mm256_fmaddsub_ps(v1.Y, v2.Z, c1);
+        output.Y = _mm256_fmaddsub_ps(v1.Z, v2.X, c2);
+        output.Z = _mm256_fmaddsub_ps(v1.X, v2.Y, c3);
+    }
+    void dot_avx(const m256_vec3& v1, const m256_vec3& v2, __m256& output) {
+        output = _mm256_fmadd_ps(
+            v1.Z,
+            v2.Z,
+            _mm256_fmadd_ps(
+                v1.Y,
+                v2.Y,
+                _mm256_mul_ps(
+                    v1.X,
+                    v2.X
+                )
+            )
+        );
+    }
+    __m256 inline_dot_avx(const m256_vec3& v1, const m256_vec3& v2) {
+        __m256 output;
+        dot_avx(v1, v2, output);
+        return output;
+    }
+    void dot_mul_avx(const m256_vec3& v1, const m256_vec3& v2, const __m256& v3, __m256& output) {
+        output = _mm256_mul_ps(
+            v3,
+            _mm256_fmadd_ps(
+                v1.Z,
+                v2.Z,
+                _mm256_fmadd_ps(
+                    v1.Y,
+                    v2.Y,
+                    _mm256_mul_ps(
+                        v1.X,
+                        v2.X
+                    )
+                )
+            )
+        );
+    }
     double poly_acos(decimal x) {
         return (-0.69813170079773212 * x * x - 0.87266462599716477) * x + 1.5707963267948966;
     }
@@ -933,6 +1100,16 @@ public:
             point.X * m.data[6] + point.Y * m.data[7] + point.Z * m.data[8]
         );
     }
+    //static Matrix3x3 createMatrix(const XYZ& start, const XYZ& end) {
+    //    XYZ v = XYZ::cross(start, end);
+    //    XYZ s = XYZ::magnitude(v);
+    //    double c = XYZ::dot(start, end);
+    //    Matrix3x3 v_b = Matrix3x3(
+    //        0   ,-v[2], v[1],
+    //        v[2],    0,-v[0],
+    //       -v[1], v[0],    0
+    //    );
+    //}
     static XYZ aligned_random(decimal spread, const Matrix3x3& r) {
         return applyRotationMatrix(VecLib::lookup_random_cone(spread),r);
     }
@@ -954,6 +1131,13 @@ public:
             other.X * mat.data[0] + other.Y * mat.data[1] + other.Z * mat.data[2],
             other.X * mat.data[3] + other.Y * mat.data[4] + other.Z * mat.data[5],
             other.X * mat.data[6] + other.Y * mat.data[7] + other.Z * mat.data[8]
+        );
+    }
+    static Matrix3x3 transpose(const Matrix3x3& m) {
+        return Matrix3x3(
+            m.data[0], m.data[3], m.data[6],
+            m.data[1], m.data[4], m.data[7],
+            m.data[2], m.data[5], m.data[8]
         );
     }
 };
@@ -1332,6 +1516,8 @@ class SpotLight {
     }
 };
 
+
+
 struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1;
     XYZ normal;
@@ -1341,6 +1527,7 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
     XY U_delta;
     XY V_delta;
     Material* material;
+    XYZ origin_offset;
     PackagedTri() {}
     PackagedTri(const XYZ& _p1, const XYZ& _p2, const XYZ& _p3, XY UV_U, XY UV_V, XY UV_base, Material* _material) {
         material = _material;
@@ -1351,6 +1538,7 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
         U_delta = UV_U-UV_base;
         V_delta = UV_V-UV_base;
         UV_basis = UV_base;
+        origin_offset = XYZ::dot((_p1+_p2+_p3)/3, normal) * normal;
     }
     static bool equals(const PackagedTri& t1, const PackagedTri& t2) {
         bool test1 = XYZ::equals(t1.p1,t2.p1);
@@ -1359,6 +1547,131 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
         bool test4 = XYZ::equals(t1.p1p2, t2.p1p2);
         bool test5 = t1.material == t2.material;
         return test1 && test2 && test3 && test4 && test5;
+    }
+};
+
+struct PTri_AVX { //literally 0.7kB of memory. What have I done.
+    m256_vec3 p1;
+    m256_vec3 p1p2;
+    m256_vec3 p1p3;
+    m256_vec3 normal;
+    m256_vec3 origin_offset;
+    m256_vec2 UV_basis;
+    m256_vec2 U_delta;
+    m256_vec2 V_delta;
+    Material* materials[8];
+    char size = 0;
+    PTri_AVX(vector<PackagedTri> tris) {
+        vector<XYZ> _p1;
+        vector<XYZ> _p1p2;
+        vector<XYZ> _p1p3;
+        vector<XYZ> _normal;
+        vector<XYZ> _origin_offset;
+        vector<XY>  _UV_basis;
+        vector<XY>  _U_delta;
+        vector<XY>  _V_delta;
+        size = tris.size();
+        for (int i = 0; i < tris.size() && i < 8; i++) {
+            PackagedTri& tri = tris[i];
+            _p1.push_back(tri.p1);
+            _p1p2.push_back(tri.p1p2);
+            _p1p3.push_back(tri.p1p3);
+            _normal.push_back(tri.normal);
+            _origin_offset.push_back(tri.origin_offset);
+            _UV_basis.push_back(tri.UV_basis);
+            _U_delta.push_back(tri.U_delta);
+            _V_delta.push_back(tri.V_delta);
+            materials[i] = tri.material;
+        }
+        p1 = m256_vec3(_p1);
+        p1p2 = m256_vec3(_p1p2);
+        p1p3 = m256_vec3(_p1p3);
+        normal = m256_vec3(_normal);
+        origin_offset = m256_vec3(_origin_offset);
+        UV_basis = m256_vec2(_UV_basis);
+        U_delta = m256_vec2(_U_delta);
+        V_delta = m256_vec2(_V_delta);
+    }
+    static void intersection_check(const PTri_AVX& T, const m256_vec3& position, const m256_vec3& slope, m256_vec3& output) { //my FUCKING cache 
+        m256_vec3 pvec;
+        VecLib::cross_avx(slope, T.p1p3, pvec);
+        __m256 det;
+        VecLib::dot_avx(T.p1p2, pvec, det);
+
+        __m256 invDet = _mm256_div_ps(_mm256_set1_ps(1), det);
+
+        m256_vec3 tvec;
+        m256_vec3::sub(position, T.p1, tvec);
+        m256_vec3 qvec;
+        VecLib::cross_avx(tvec, T.p1p2, qvec);
+
+        m256_vec2 uv;
+        VecLib::dot_mul_avx(tvec, pvec, invDet, uv.X);
+        VecLib::dot_mul_avx(slope, qvec, invDet, uv.Y);
+        VecLib::dot_mul_avx(T.p1p3, qvec, invDet, output.X); //t
+
+        __m256 u_pass = _mm256_cmp_ps(uv.X, _mm256_set1_ps(0), _CMP_GE_OQ);
+        __m256 v_pass = _mm256_cmp_ps(uv.Y, _mm256_set1_ps(0), _CMP_GE_OQ);
+        __m256 uv_pass = _mm256_cmp_ps(
+            _mm256_add_ps(
+                uv.X,
+                uv.Y
+            ),
+            _mm256_set1_ps(1),
+            _CMP_LE_OQ
+        );
+
+        __m256 final_mask = _mm256_and_ps(
+            uv_pass,
+            _mm256_and_ps(
+                u_pass,
+                v_pass
+            )
+        );
+
+        output.X = _mm256_and_ps(
+            final_mask,
+            output.X
+        );
+            
+
+        output.Y = _mm256_fmadd_ps( //u
+            uv.X,
+            T.U_delta.X,
+            _mm256_fmadd_ps(
+                uv.Y,
+                T.V_delta.X,
+                T.UV_basis.X
+            )
+        );
+        output.Z = _mm256_fmadd_ps( //v
+            uv.X,
+            T.U_delta.Y,
+            _mm256_fmadd_ps(
+                uv.Y,
+                T.V_delta.Y,
+                T.UV_basis.Y
+            )
+        );
+    }
+    static void get_normal(const PTri_AVX& T, const m256_vec3& position, m256_vec3& output) {
+        __m256 dot;
+        m256_vec3 relative_position;
+        m256_vec3::sub(position, T.origin_offset, relative_position);
+        __m256 sgn = VecLib::sgn_fast(dot);
+        VecLib::dot_avx(T.normal, relative_position, dot); //this can probably be done faster via xor of sign bit rather than multiplication, but whatever
+        output.X = _mm256_mul_ps(
+            T.normal.X,
+            sgn
+        );
+        output.Y = _mm256_mul_ps(
+            T.normal.Y,
+            sgn
+        );
+        output.Z = _mm256_mul_ps(
+            T.normal.Z,
+            sgn
+        );
     }
 };
 
@@ -1418,8 +1731,17 @@ public:
     static XYZ intersection_check(const PackagedTri& T, const XYZ& position, const XYZ& slope) {
         return intersection_check_MoTru(T, position, slope);
     }
-    static XYZ get_normal(XYZ normal, XYZ position) {
-        return (XYZ::dot(normal, position) > 0) ? normal : -normal;
+    static XYZ random(const PackagedTri& T) {
+        float r1 = fRand(0, 1);
+        float r2 = fRand(0, 1);
+        if (r1 + r2 > 1) {
+            r1 = 1 - r1;
+            r2 = 1 - r2;
+        }
+        return r1 * T.p1p2 + r2 * T.p1p3;
+    }
+    static XYZ get_normal(XYZ normal, XYZ relative_position) {
+        return (XYZ::dot(normal, relative_position) > 0) ? normal : -normal;
     }
     PackagedTri pack() {
         return PackagedTri(
@@ -1511,9 +1833,19 @@ public:
         origin = _origin;
         normal = XYZ::normalize(_normal);
         origin_offset = XYZ::dot(origin, normal) * normal;
-        obj_type = 2;
     }
-
+    void set_origin(XYZ _origin) {
+        origin = _origin;
+        origin_offset = XYZ::dot(origin, normal) * normal;
+    }
+    void set_normal(XYZ _normal) {
+        normal = XYZ::normalize(_normal);
+        origin_offset = XYZ::dot(origin, normal) * normal;
+    }
+    void recalc() {
+        normal = XYZ::normalize(normal);
+        origin_offset = XYZ::dot(origin, normal) * normal;
+    }
     bool check_backface(XYZ& position) {
         return true;
     }
@@ -1572,6 +1904,7 @@ public:
             rotation = Quat::multiply(rotation, *rot_transform);
         }
     }
+    //takes an XYZ position reference, and applies itself to it
     void apply(XYZ& position) {
         if (rot_transform != nullptr) {
             position = Quat::applyRotation(position, *rot_transform);
@@ -1587,88 +1920,6 @@ public:
             t.stack(position, rotation);
         }
         return Transformation(position,rotation);
-    }
-};
-
-class Mesh {
-public:
-    vector<Tri> tris;
-    int primitive_count;
-    Mesh() {}
-    void prep() {
-        for (Tri& tri : tris) {
-            tri.material->prep();
-        }
-    }
-    void addTri(Tri& T) {
-        tris.push_back(T);
-        primitive_count++;
-    }
-};
-
-class Object {
-public:
-    XYZ origin;
-    XYZ scale;
-    vector<Transformation> transformations;
-    
-    vector<Object> children;
-    
-    vector<Mesh*> meshes;
-    vector<Sphere*> spheres;
-    vector<Plane*> planes;
-
-
-    Object(XYZ _origin, XYZ _scale):
-        origin(_origin), scale(_scale){
-        
-    }
-    void addMesh(Mesh* M) {
-        meshes.push_back(M);
-    }
-    void addSphere(Sphere* S) {
-        spheres.push_back(S);
-    }
-    void addPlane(Plane* P) {
-        planes.push_back(P);
-    }
-    void prep() {
-        for (Mesh* m : meshes) {
-            m->prep();
-        }
-    }
-    void _registerRotation(Quat rot) {
-        transformations.push_back(Transformation(rot));
-    }
-    void _registerMove(XYZ move) {
-        transformations.push_back(Transformation(move));
-    }
-    void applyTransformXYZ(decimal x, decimal y, decimal z) {
-        _registerMove(XYZ(x, y, z));
-    }
-    void applyTransformXYZ(XYZ xyz) {
-        applyTransformXYZ(xyz.X, xyz.Y, xyz.Z);
-    }
-    void rotateX(decimal rotation) {
-        XYZ orig = XYZ(0, 1, 0);
-        XYZ pointing = XYZ(0, cos(rotation), sin(rotation));
-        Quat rot = Quat::makeRotation(orig, pointing);
-        _registerRotation(rot);
-    }
-    void rotateY(decimal rotation) {
-        XYZ orig = XYZ(0, 0, 1);
-        XYZ pointing = XYZ(sin(rotation), 0, cos(rotation));
-        Quat rot = Quat::makeRotation(orig, pointing);
-        _registerRotation(rot);
-    }
-    void rotateZ(decimal rotation) {
-        XYZ orig = XYZ(1, 0, 0);
-        XYZ pointing = XYZ(cos(rotation), sin(rotation), 0);
-        Quat rot = Quat::makeRotation(orig, pointing);
-        _registerRotation(rot);
-    }
-    Transformation final_transform() {
-        return Transformation::collpase(transformations);
     }
 };
 
@@ -1709,6 +1960,126 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
     }
 }
 
+class Mesh {
+public:
+    vector<Tri> tris;
+    string name = "";
+    int primitive_count;
+    Mesh() {}
+    void prep() {
+        for (Tri& tri : tris) {
+            tri.material->prep();
+        }
+    }
+    void addTri(Tri& T) {
+        tris.push_back(T);
+        primitive_count++;
+    }
+};
+
+class Object {
+public:
+    XYZ origin;
+    XYZ scale;
+    vector<Transformation> transformations;
+    
+    vector<Object*> children;
+    
+    vector<Mesh*> meshes;
+    vector<Sphere*> spheres;
+    vector<Plane*> planes;
+
+    string name = "";
+
+    Object(XYZ _origin, XYZ _scale):
+        origin(_origin), scale(_scale){
+        
+    }
+    void addMesh(Mesh* M) {
+        meshes.push_back(M);
+    }
+    void addSphere(Sphere* S) {
+        spheres.push_back(S);
+    }
+    void addPlane(Plane* P) {
+        planes.push_back(P);
+    }
+    void addChild(Object* object) {
+        children.push_back(object);
+    }
+    void prep() {
+        for (Mesh* m : meshes) {
+            m->prep();
+        }
+        for (Plane* p : planes) {
+            p->material->prep();
+        }
+        for (Sphere* s : spheres) {
+            s->material->prep();
+        }
+    }
+    void fetchData(vector<Sphere>& spheres_vec, vector<Plane>& planes_vec, vector<Tri>& tris_vec) {
+        Transformation T = final_transform();
+        for (Sphere* S : spheres) {
+            Sphere new_sphere = Sphere(*S);
+            T.apply(new_sphere.origin);
+            new_sphere.origin *= scale;
+            spheres_vec.push_back(new_sphere);
+        }
+        for (Plane* P : planes) {
+            Plane new_plane= Plane(*P);
+            T.apply(new_plane.origin);
+            new_plane.origin *= scale;
+            new_plane.normal *= scale;
+            new_plane.recalc();
+            planes_vec.push_back(new_plane);
+        }
+        for (Mesh* M : meshes) {
+            for (Tri& tri : M->tris) {
+                tris_vec.push_back(Packers::transformT(tri, T, origin, scale));
+            }
+        }
+        for (Object* child : children) {
+            child->fetchData(spheres_vec, planes_vec, tris_vec);
+        }
+    }
+    void _registerRotation(Quat rot) {
+        transformations.push_back(Transformation(rot));
+    }
+    void _registerMove(XYZ move) {
+        transformations.push_back(Transformation(move));
+    }
+    void applyTransformXYZ(decimal x, decimal y, decimal z) {
+        _registerMove(XYZ(x, y, z));
+    }
+    void applyTransformXYZ(XYZ xyz) {
+        applyTransformXYZ(xyz.X, xyz.Y, xyz.Z);
+    }
+    void rotateX(decimal rotation) {
+        XYZ orig = XYZ(0, 1, 0);
+        XYZ pointing = XYZ(0, cos(rotation), sin(rotation));
+        Quat rot = Quat::makeRotation(orig, pointing);
+        _registerRotation(rot);
+    }
+    void rotateY(decimal rotation) {
+        XYZ orig = XYZ(0, 0, 1);
+        XYZ pointing = XYZ(sin(rotation), 0, cos(rotation));
+        Quat rot = Quat::makeRotation(orig, pointing);
+        _registerRotation(rot);
+    }
+    void rotateZ(decimal rotation) {
+        XYZ orig = XYZ(1, 0, 0);
+        XYZ pointing = XYZ(cos(rotation), sin(rotation), 0);
+        Quat rot = Quat::makeRotation(orig, pointing);
+        _registerRotation(rot);
+    }
+    Transformation final_transform() {
+        return Transformation::collpase(transformations);
+    }
+};
+
+
+
 
 
 //http://bannalia.blogspot.com/2015/06/cache-friendly-binary-search.html
@@ -1720,20 +2091,24 @@ class BVH {
 public:
     XYZ max = XYZ(0,0,0);
     XYZ min = XYZ(0,0,0);
-    vector<Tri*>* elements = nullptr;
-    vector<PackagedTri> packedEl;
+    vector<Tri*> elements;
     BVH* c1 = nullptr;
     BVH* c2 = nullptr;
     BVH* parent;
+    int _count = -1;
     BVH() {    }
     BVH(vector<Tri*>* T_vec) {
-        elements = new vector<Tri*>(*T_vec);
+        elements = vector<Tri*>(*T_vec);
         leaf_total += T_vec->size();
         for (Tri* T_ptr : *T_vec) {
             max = XYZ::max(max, T_ptr->AABB_max);
             min = XYZ::min(min, T_ptr->AABB_min);
         }
         
+    }
+    ~BVH() {
+        delete c1;
+        delete c2;
     }
     static decimal intersection(const XYZ& max, const XYZ& min, const XYZ& origin, const XYZ& inv_slope) {
         decimal tx1 = (min.X - origin.X) * inv_slope.X;
@@ -1766,51 +2141,26 @@ public:
             return -1;
         }
     }
-    static decimal intersection_alt(const XYZ& max, const XYZ& min, const XYZ& origin, const XYZ& inv_slope) {
-        XYZ t0 = (min - origin) * inv_slope;
-        XYZ t1 = (max - origin) * inv_slope;
-        XYZ tmin = XYZ::min(t0, t1);
-        XYZ tmax = XYZ::max(t0, t1);
-        decimal max_t = XYZ::minComponent(tmax);
-        decimal min_t = XYZ::maxComponent(tmin);
-        
-        if (max_t >= min_t) { //introduces a branch, but itll probably be fine. Lets me order search checks by nearest intersection
-            if (min_t >= 0) {
-                return min_t;
-            }
-            else {
-                return max_t;
-            }
-        }
-        else {
-            return -1;
-        }
-    }
     decimal intersection(const XYZ& origin, const XYZ& inv_slope) { //https://tavianator.com/2011/ray_box.html
         return BVH::intersection(max, min, origin, inv_slope);
     }
-    void prep() {
-        //XYZ avg = (max + min) / 2;
-        //XYZ max_ad = max - avg;
-        //XYZ min_ad = min - avg;
-        //max += max_ad*5;
-        //min += min_ad*5;
-        if (c1 != nullptr) {
-            c1->prep();
-            c2->prep();
-        }
-        else {
-            for (Tri* t : *elements) {
-                packedEl.push_back(t->pack());
-            }
-            delete elements;
-        }
-    }
+    
     struct WorkPacket {
         BVH* target;
         vector<Tri*>* contents;
         WorkPacket(BVH* t, vector<Tri*>* c) : target(t), contents(c) {}
     };
+    //very dangerous. only ever use if BVH is being used as an intermediate
+    //will turn every tri into a hanging pointer if the passed vector moves out of scope
+    int construct_dangerous(vector<Tri>& initial_geo) {
+        vector<Tri*>* working_data = new vector<Tri*>();
+        working_data->reserve(initial_geo.size());
+        for (Tri& T : initial_geo) {
+            working_data->push_back(&T);
+        }
+        int return_value = construct(working_data);
+        return return_value;
+    }
     int construct(vector<Tri*>* initial_geo) {
         queue<WorkPacket> packets;
         assertm((initial_geo->size() > 0), "BVH was creation was attempted with zero geometry. Did everything load right?");
@@ -1842,14 +2192,24 @@ public:
             Split* probe_split = probe(geo);
             get_stats(geo, *probe_split);
             evaluate_split(*probe_split, 1);
+            
+
             if (probe_split->score < split->score) {
                 delete split;
                 split = probe_split;
             }
             auto bins = bin(split, geo);
+            //if (geo->size() > 200) {
+            //    auto binned_split = binned_split_probe(geo);
+            //    if (binned_split.first->score < split->score) {
+            //        bins = binned_split.second;
+            //        split = binned_split.first;
+            //    }
+            //}
+            
 
             if (((size_t)abs((int)(bins.p_geo->size() - bins.n_geo->size()))) == geo->size()) {
-                target->elements = new vector<Tri*>(*geo);
+                target->elements = vector<Tri*>(*geo);
                 leaf_total += geo->size();
                 packets.pop();
                 continue;
@@ -1902,8 +2262,8 @@ public:
             if (c2 != nullptr) {
                 c2->flatten(l, t, depth);
             }
-            if (elements != nullptr) {
-                for (auto T : *elements) {
+            if (elements.size()>0) {
+                for (auto T : elements) {
                     t->push_back(T);
                 }
             }
@@ -1921,18 +2281,24 @@ public:
             c2->size(s);
         }
     }
-    int count() {
-        int s = 0;
-        count(s);
-        return s;
+    int count(){
+        if (_count == -1) {
+            count(_count);
+        }
+        return _count;
     }
-    void count(int& s) {
-        s+=this->packedEl.size();
+    void count(int& s) const {
+        s+=this->elements.size();
         if (c1 != nullptr) {
-            c1->size(s);
-            c2->size(s);
+            c1->count(s);
+            c2->count(s);
         }
     }
+    float avg_path() const {
+        if (c1 == nullptr) return 0;
+        return (c1->avg_path() + c2->avg_path()) / 2.0;
+    }
+    
 private:
     struct BinResults {
         vector<Tri*>* p_geo;
@@ -2016,24 +2382,254 @@ private:
         XYZ right_max;
         XYZ right_min;
         Tri* parent;
-        relevant_value(Tri* source) {
+        int value_selector = 0;
+        relevant_value(Tri* source, int v_selector = 0) {
             parent = source;
             midpoint = parent->midpoint;
             max = parent->AABB_max;
             min = parent->AABB_min;
+            value_selector = v_selector;
+        }
+        XYZ get_value() const {
+            switch (value_selector) {
+            case 0:
+                return min;
+            case 1:
+                return midpoint;
+            case 2:
+                return max;
+            default:
+                throw exception("out of bounds value selector");
+            }
         }
         struct comparer {
         public:
-            comparer(char compare_index) {
+            comparer(char compare_index, bool _use_selector = false) {
                 internal_index = compare_index;
+                use_selector = _use_selector;
             }
             inline bool operator()(const relevant_value& v1, const relevant_value& v2) {
+                if (use_selector) {
+                    XYZ v1_value = v1.get_value();
+                    XYZ v2_value = v2.get_value();
+                    return v1_value[internal_index] < v2_value[internal_index];
+                }
                 return v1.midpoint[internal_index] < v2.midpoint[internal_index];
             }
         private:
             char internal_index;
+            bool use_selector;
         };
     };
+    pair<Split*,BinResults> binned_split_probe(vector<Tri*>* geo) {
+        int min_bins = 10;
+        int max_bins = 100;
+        int bin_count = std::max(min_bins, std::min(max_bins, (int)geo->size()));
+        int adaptive_bin_count = 3;
+        int adpative_sweep_recusion_count = 1;
+
+        int geo_count = geo->size();
+        auto sorted = vector<relevant_value>();
+
+        Split operator_split = Split(XYZ(), 0);
+        Split best = operator_split;
+        best.score = 999999999999999999999999.0;
+
+        for (Tri* T_ptr : *geo) {
+            sorted.push_back(relevant_value(T_ptr, 0));
+            //sorted.push_back(relevant_value(T_ptr, 1));
+            sorted.push_back(relevant_value(T_ptr, 2));
+        }
+        for (int i = 0; i < 3; i++) {
+            operator_split.facing = i;
+            sort(sorted.begin(), sorted.end(), relevant_value::comparer(i,true));
+
+            XYZ left_min = sorted.front().min;
+            XYZ left_max = sorted.front().min;
+            XYZ right_min = sorted.back().min;
+            XYZ right_max = sorted.back().max;
+            int left_count = 0;
+            int right_count = geo_count;
+
+            
+
+            for (int j = sorted.size() - 1; j >= 0; j--) {
+                relevant_value& v = sorted[j];
+                v.right_min = right_min;
+                v.right_max = right_max;
+                if (v.value_selector == 0) {
+                    right_min = XYZ::min(right_min, v.min);
+                    right_max = XYZ::max(right_max, v.max);
+                }
+            }
+
+            double span = right_max[i] - right_min[i];
+            double bin_interval = span / (bin_count);
+            vector<double> bin_scores;
+
+            operator_split.n.min = XYZ();
+            operator_split.n.max = XYZ();
+            operator_split.n.count = 0;
+            operator_split.p.min = right_min;
+            operator_split.p.max = right_max;
+            operator_split.p.count = geo_count;
+            evaluate_split(operator_split, 1);
+            if (operator_split.score < best.score) best = operator_split;
+
+            double pos = left_min[i];
+            int index = 0;
+            set<Tri*> partials;
+            vector<vector<int>> debug;
+            for (int j = 0; j < bin_count; j++) {
+                while (index < sorted.size() && sorted[index].get_value()[i] < pos) {
+                    relevant_value& v = sorted[index];
+                    assert(v.parent != nullptr);
+                    if (v.value_selector == 0) {
+                        partials.insert(v.parent);
+                        left_count++;
+                    }
+                    if (v.value_selector == 2) {
+                        partials.erase(v.parent);
+                        right_min = v.right_min;
+                        right_max = v.right_max;
+                        left_min = XYZ::min(v.min, left_min);
+                        left_max = XYZ::max(v.max, left_max);
+                        right_count--;
+                    }
+                    debug.push_back(vector<int>());
+                    debug.back().push_back(left_count);
+                    debug.back().push_back(right_count);
+                    debug.back().push_back(index);
+                    index++;
+                }
+                
+                XYZ temp_right_min = right_min;  
+                XYZ temp_right_max = right_max;  
+                XYZ temp_left_min  = left_min ;
+                XYZ temp_left_max  = left_max ;
+
+                vector<XYZ> planar;
+                for (Tri* T : partials) {
+                    vector<XYZ> points;
+                    vector<XYZ> left; //note, this is probably pretty inefficient, but its a simple solution
+                    vector<XYZ> right;
+                    points.push_back(T->p1);
+                    points.push_back(T->p2);
+                    points.push_back(T->p3);
+                    for (int ti = 0; ti < 3; ti++) {
+                        XYZ p = points[ti];
+                        if (p[i] < pos)left.push_back(p);
+                        if (p[i] == pos)planar.push_back(p);
+                        if (p[i] > pos)right.push_back(p);
+                    }
+                    
+                    for (int li = 0; li < left.size(); li++) {
+                        for (int ri = 0; ri < right.size(); ri++) {
+                            XYZ v1 = left[li];
+                            XYZ v2 = right[ri];
+                            XYZ slope = XYZ::slope(v1,v2);
+                            double t_span = v2[i] - v1[i];
+                            double t = (pos - v1[i]) / t_span;
+                            XYZ planar_point = slope * t + v1;
+                            planar.push_back(planar_point);
+                        }
+                    }
+                }
+                for (XYZ& p : planar) {
+                    temp_right_min = XYZ::min(p, temp_right_min);
+                    temp_right_max = XYZ::max(p, temp_right_max);
+                    temp_left_min = XYZ::min(p, temp_left_min);
+                    temp_left_max = XYZ::max(p, temp_left_max);
+                }
+                operator_split.n.min = temp_left_min;
+                operator_split.n.max = temp_left_max;
+                operator_split.n.count = left_count;
+                operator_split.p.min = temp_right_min;
+                operator_split.p.max = temp_right_max;
+                operator_split.p.count = right_count;
+                operator_split.placement = temp_left_max;
+                evaluate_split(operator_split, 1);
+                if (operator_split.score < 0) {
+                    assert(0);
+                }
+                if (operator_split.score < best.score) {
+                    best = operator_split;
+                }
+                bin_scores.push_back(operator_split.score);
+                pos += bin_interval;
+
+            }
+            for (int i = 0; i < bin_scores.size(); i++) {
+                cout << bin_scores[i] << endl;
+            }
+        }
+        exit(0);
+
+        BinResults out_bin = BinResults();
+        out_bin.n_geo = new vector<Tri*>();
+        out_bin.p_geo = new vector<Tri*>();
+        int facing = best.facing;
+        for (Tri* T : *geo) {
+            if (T->AABB_max[facing] < best.placement[facing]) {
+                out_bin.n_geo->push_back(T);
+                continue;
+            }
+            if (T->AABB_min[facing] > best.placement[facing]) {
+                out_bin.p_geo->push_back(T);
+                continue;
+            }
+            
+            vector<XYZ> points;
+            vector<XYZ> left; //note, this is probably pretty inefficient, but its a simple solution
+            vector<XYZ> right;
+            points.push_back(T->p1);
+            points.push_back(T->p2);
+            points.push_back(T->p3);
+            Tri* left_T  = new Tri(*T);
+            Tri* right_T = new Tri(*T);
+            left_T->AABB_min = T->AABB_max;
+            left_T->AABB_max = T->AABB_min;
+            right_T->AABB_min = T->AABB_max;
+            right_T->AABB_max = T->AABB_min;
+            double pos = best.placement[facing];
+            for (int ti = 0; ti < 3; ti++) {
+                XYZ p = points[ti];
+                if (p[facing] < pos) {
+                    left.push_back(p);
+                    left_T->AABB_min = XYZ::min(left_T->AABB_min, p);
+                    left_T->AABB_max = XYZ::max(left_T->AABB_max, p);
+                }
+                if (p[facing] == pos) {
+                    left_T->AABB_min = XYZ::min(left_T->AABB_min, p);
+                    left_T->AABB_max = XYZ::max(left_T->AABB_max, p);
+                    right_T->AABB_min = XYZ::min(right_T->AABB_min, p);
+                    right_T->AABB_max = XYZ::max(right_T->AABB_max, p);
+                }
+                if (p[facing] > pos) {
+                    right_T->AABB_min = XYZ::min(right_T->AABB_min, p);
+                    right_T->AABB_max = XYZ::max(right_T->AABB_max, p);
+                }
+            }
+
+            for (int li = 0; li < left.size(); li++) {
+                for (int ri = 0; ri < right.size(); ri++) {
+                    XYZ v1 = left[li];
+                    XYZ v2 = right[ri];
+                    XYZ slope = XYZ::slope(v1, v2);
+                    double t_span = v2[facing] - v1[facing];
+                    double t = (pos - v1[facing]) / t_span;
+                    XYZ p = slope * t + v1;
+                    left_T->AABB_min = XYZ::min(left_T->AABB_min, p);
+                    left_T->AABB_max = XYZ::max(left_T->AABB_max, p);
+                    right_T->AABB_min = XYZ::min(right_T->AABB_min, p);
+                    right_T->AABB_max = XYZ::max(right_T->AABB_max, p);
+                }
+            }
+            out_bin.n_geo->push_back(left_T);
+            out_bin.p_geo->push_back(right_T);
+        }
+        return pair<Split*,BinResults>(new Split(best),out_bin);
+    }
     Split* probe(vector<Tri*>* geo) {
         
         auto sorted = vector<relevant_value>();
@@ -2044,10 +2640,12 @@ private:
         Split best = operator_split;
         best.score = 999999999999999999999999.0;
         int geo_count = geo->size();
+        int iteration = 0;
+        double last_read = 0;
         for (int i = 0; i < 3; i++) {
             operator_split.facing = i;
-            sort(sorted.begin(), sorted.end(), relevant_value::comparer(0));
-            
+            sort(sorted.begin(), sorted.end(), relevant_value::comparer(i));
+
             XYZ left_min = sorted.front().min;
             XYZ left_max = sorted.front().max;
             XYZ right_min = sorted.back().min;
@@ -2060,6 +2658,7 @@ private:
                 v.right_min = right_min;
                 v.right_max = right_max;
             }
+            
             operator_split.n.min = XYZ();
             operator_split.n.max = XYZ();
             operator_split.n.count = 0;
@@ -2067,14 +2666,20 @@ private:
             operator_split.p.max = right_max;
             operator_split.p.count = geo_count;
             evaluate_split(operator_split, 1);
-            if (operator_split.score < best.score) {
-                best = operator_split;
-            }
+            if (operator_split.score < best.score) best = operator_split;
+
+            double prev_pos = -99999999;
+            int segments = 100;
+            double span = right_max[i] - right_min[i];
+            double segment = segments / span;
+
+            
             for (int j = 0; j < sorted.size(); j++) {
                 auto v = sorted[j];
                 left_min = XYZ::min(left_min, v.min);
                 left_max = XYZ::max(left_max, v.max);
                 count++;
+                prev_pos = v.midpoint[i];
                 operator_split.n.min = left_min;
                 operator_split.n.max = left_max;
                 operator_split.n.count = count;
@@ -2086,8 +2691,15 @@ private:
                 if (operator_split.score < best.score) {
                     best = operator_split;
                 }
+                if (abs(operator_split.score-last_read)/operator_split.score > 0.05) {
+                    //cout << iteration << endl;
+                    //cout << operator_split.score << endl;
+                    last_read = operator_split.score;
+                }
+                iteration++;
             }
         }
+        //exit(0);
         
         return new Split(best);
     }
@@ -2114,12 +2726,19 @@ private:
         }
     }
     static decimal evaluate_split(Split& split, decimal SA_parent) {
-        const decimal traversal_cost = 1;
-        const decimal intersect_cost = 1;
+        decimal traversal_cost = 1;
+        decimal intersect_cost = 1;
         decimal Sa = split.p.SA()/SA_parent;
         decimal Sb = split.n.SA()/SA_parent;
-        decimal Ha = Sa * split.p.count * intersect_cost;
-        decimal Hb = Sb * split.n.count * intersect_cost;
+        int count_a = split.p.count;
+        int count_b = split.n.count;
+#if PENALIZE_UNFILLED_LEAFS
+        count_a = ceil(count_a / (float)LEAF_SIZE);
+        count_b = ceil(count_b / (float)LEAF_SIZE);
+        intersect_cost = 2;
+#endif
+        decimal Ha = Sa * count_a * intersect_cost;
+        decimal Hb = Sb * count_b * intersect_cost;
         decimal final_h = traversal_cost + Ha + Hb;
         split.score = final_h;
         return final_h;
@@ -2163,11 +2782,11 @@ private:
                 BVH* target = selection.first;
                 int parent_index = selection.second;
                 auto PBVH = PackagedBVH(target);
-                PBVH.leaf_size = target->packedEl.size();
+                PBVH.leaf_size = target->elements.size();
                 if (PBVH.leaf_size > 0) {
                     PBVH.index = tri_vec->size();
                     for (int i = 0; i < PBVH.leaf_size; i++) {
-                        tri_vec->push_back(target->packedEl[i]);
+                        tri_vec->push_back(target->elements[i]->pack());
                     }
                 }
                 if (target->c1 != nullptr) {
@@ -2190,64 +2809,178 @@ private:
     }
 };
 
-/*
-class AVX_BVH {
+
+
+int total_tris = 0; 
+int nodes_traversed = 0;
+
+class BVH_AVX {
 public:
-    __mm256 
-    static decimal intersection(const XYZ& max, const XYZ& min, const XYZ& origin, const XYZ& inv_slope) {
-        decimal tx1 = (min.X - origin.X) * inv_slope.X;
-        decimal tx2 = (max.X - origin.X) * inv_slope.X;
-
-        decimal tmin = std::min(tx1, tx2);
-        decimal tmax = std::max(tx1, tx2);
-
-        decimal ty1 = (min.Y - origin.Y) * inv_slope.Y;
-        decimal ty2 = (max.Y - origin.Y) * inv_slope.Y;
-
-        tmin = std::max(tmin, std::min(ty1, ty2));
-        tmax = std::min(tmax, std::max(ty1, ty2));
-
-        decimal tz1 = (min.Z - origin.Z) * inv_slope.Z;
-        decimal tz2 = (max.Z - origin.Z) * inv_slope.Z;
-
-        tmin = std::max(tmin, std::min(tz1, tz2));
-        tmax = std::min(tmax, std::max(tz1, tz2));
-
-        if (tmax >= tmin) { //introduces a branch, but itll probably be fine. Lets me order search checks by nearest intersection
-            if (tmin >= 0) {
-                return tmin;
-            }
-            else {
-                return tmax;
-            }
+    m256_vec3 max;
+    m256_vec3 min;
+    unsigned int leaf_size[8];
+    unsigned int indexes[8];
+    BVH_AVX(vector<BVH*>& batch) {
+        vector<XYZ> max_vec;
+        vector<XYZ> min_vec;
+        for (int i = 0; i < batch.size(); i++) {
+            max_vec.push_back(batch[i]->max);
+            min_vec.push_back(batch[i]->min);
+            leaf_size[i] = batch[i]->elements.size();
+            total_tris += leaf_size[i];
         }
-        else {
-            return -1;
+        for (int i = batch.size(); i < 8;i++) {
+            max_vec.push_back(XYZ());
+            min_vec.push_back(XYZ());
+            leaf_size[i] = 0;
+            indexes[i] = 0;
+        }
+        max = m256_vec3(max_vec);
+        min = m256_vec3(min_vec);
+
+
+    }
+    __m256 intersection(const m256_vec3& fusedorigin, const m256_vec3& inv_slope) const { //holy mother of moving data. I pray for you, my cpu, I pray
+        __m256 tx1 = _mm256_fmadd_ps(min.X, inv_slope.X, fusedorigin.X);
+        __m256 tx2 = _mm256_fmadd_ps(max.X, inv_slope.X, fusedorigin.X);
+        __m256 ty1 = _mm256_fmadd_ps(min.Y, inv_slope.Y, fusedorigin.Y);
+        __m256 ty2 = _mm256_fmadd_ps(max.Y, inv_slope.Y, fusedorigin.Y);
+        __m256 tz1 = _mm256_fmadd_ps(min.Z, inv_slope.Z, fusedorigin.Z);
+        __m256 tz2 = _mm256_fmadd_ps(max.Z, inv_slope.Z, fusedorigin.Z);
+
+        __m256 tmin = _mm256_max_ps(
+            _mm256_min_ps(tz1, tz2),
+            _mm256_max_ps(
+                _mm256_min_ps(ty1, ty2),
+                _mm256_min_ps(tx1, tx2)
+            ));
+        __m256 tmax = _mm256_min_ps(
+            _mm256_max_ps(tz1, tz2),
+            _mm256_min_ps(
+                _mm256_max_ps(ty1, ty2),
+                _mm256_max_ps(tx1, tx2)
+            ));
+        __m256 diff = _mm256_sub_ps(tmax, tmin);
+        __m256 masked_diff = _mm256_max_ps(
+            diff,
+            _mm256_set1_ps(0)
+        );
+        __m256 return_mask = _mm256_div_ps(
+            masked_diff,
+            diff
+        );
+        __m256 final = _mm256_mul_ps(
+            _mm256_add_ps(
+                tmin,
+                masked_diff
+            ),
+            return_mask
+        );
+        return final;
+    }
+    static pair<vector<BVH_AVX>*, vector<PackagedTri>*> collapse(BVH* top) {
+        vector<PackagedTri>* tri_vec = new vector<PackagedTri>();
+        int tri_count = top->count();
+        int tree_size = top->size();
+        vector<BVH_AVX> v;
+        v.reserve(top->size());
+        tri_vec->reserve(tri_count + 1);
+        BVH_AVX::collapse(v, tri_vec, top);
+        vector<BVH_AVX>* out = new vector<BVH_AVX>();
+        out->swap(v);//trimming overallocation of vector
+        return pair<vector<BVH_AVX>*, vector<PackagedTri>*>(out, tri_vec);
+    }
+private:
+    struct comparer {
+        bool operator()(BVH* b1,BVH* b2) {
+            //return b1->avg_path() < b2->avg_path();
+            return VecLib::surface_area(b1->max, b1->min) * b1->count() > VecLib::surface_area(b2->max, b2->min) * b2->count();
+        }
+    };
+    static void collapse(vector<BVH_AVX>& vec, vector<PackagedTri>* tri_vec, BVH* top) {
+        vector<pair<BVH*, pair<int, int>>> current;
+        vector<pair<BVH*, pair<int, int>>> next;
+
+        int accumulated_index = 0;
+        current.push_back(pair<BVH*, pair<int,int>>(top, pair<int,int>(- 1,-1)));
+        while (current.size() > 0) {
+            for (int i = 0; i < current.size(); i++) {
+                auto selection = current.at(i);
+                vector<BVH*> batch;
+                vector<BVH*> has_tris;
+                batch.push_back(selection.first);
+                while (true) {
+                    while(batch.size()+has_tris.size()<8) {
+                        BVH* at_index = batch[0];
+                        if(at_index->c1!=nullptr){
+                            batch.push_back(at_index->c1);
+                            batch.push_back(at_index->c2);
+                            nodes_traversed+=2;
+                            batch.erase(batch.begin());
+                        }
+                        else {
+                            has_tris.push_back(at_index);
+                            batch.erase(batch.begin());
+                            if (batch.size() == 0) {
+                                break;
+                            }
+                        }
+                        sort(batch.begin(), batch.end(), comparer());
+                    }
+                    if (has_tris.size() + batch.size() >= 8 || batch.size() == 0) {
+                        if (has_tris.size() + batch.size() > 8) {
+                            cout << "error occured in AVX BVH construction: over allocated" << endl;
+                            throw exception();
+                        }
+                        for (int i = 0; i < has_tris.size(); i++) {
+                            batch.push_back(has_tris[i]);
+                        }
+                        break;
+                    }
+                }
+                BVH* target = selection.first;
+                int parent_index = selection.second.first;
+                int point_back_index = selection.second.second;
+                BVH_AVX ABVH(batch);
+                for (int i = 0; i < batch.size(); i++) {
+                    if (ABVH.leaf_size[i] > 0) {
+                        ABVH.indexes[i] = tri_vec->size();
+                        for (int j = 0; j < ABVH.leaf_size[i]; j++) {
+                            tri_vec->push_back(batch[i]->elements[j]->pack());
+                        }
+                    } else {
+                        next.push_back(pair<BVH*, pair<int,int>>(batch[i], pair<int,int>(accumulated_index,i)));
+                    }
+                }
+                vec.push_back(ABVH);
+                if (parent_index != -1) {
+                    BVH_AVX& parent = vec[parent_index];
+                    for (int k = 0; k < 8; k++) {
+                        parent.indexes[point_back_index] = accumulated_index;
+                    }
+                }
+                accumulated_index++;
+            }
+            current = next;
+            next.clear();
         }
     }
 };
-*/
+
 struct PackagedRay {
     XYZ position;
     XYZ slope;
     XYZ coefficient;
     XYZ* output;
-    char remaining_bounces;
-    char remaining_monte_carlo;
-    int monte_diffuse;
-    short monte_shadow;
-    bool check_lighting;
+    char generation = 0;
     PackagedRay() {};
-    PackagedRay(XYZ _position, XYZ _slope, XYZ co, XYZ* out, char bounces, char monte_carlo_bounces, int monte_dif, short monte_shad, bool _check_lighting) :
+    PackagedRay(XYZ _position, XYZ _slope, XYZ co, XYZ* out, char gen) :
         position(_position),
         slope(_slope),
         coefficient(co),
         output(out),
-        monte_diffuse(monte_dif),
-        monte_shadow(monte_shad),
-        remaining_bounces(bounces),
-        remaining_monte_carlo(monte_carlo_bounces),
-        check_lighting(_check_lighting) {}
+        generation(gen)
+    {}
     void move(decimal distance) {
         position += slope * distance;
     }
@@ -2324,7 +3057,8 @@ private:
     }
     static XYZ _at_function(Lens* self, int p_x, int p_y, int sample_index) {
         RectLens* self_rect = (RectLens*)self;
-        return XYZ(self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index]);
+        XY pos = self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index];
+        return XYZ(pos.X,0,pos.Y);
     }
     static Lens* _clone_function(Lens* self) {
         RectLens* rect_self = (RectLens*)self;
@@ -2341,6 +3075,7 @@ class Camera {
     //and to allow progressive output updates during monte carlo rendering
 public:
     XYZ position;
+    Quat rotation = Quat(0,0,0,1);
 
     Lens* lens;
     XYZ focal_position;
@@ -2361,7 +3096,7 @@ public:
     }
 
     XYZ slope_at(int p_x, int p_y, int sample_index) {
-        return XYZ::slope(focal_position,lens->at(p_x, p_y, sample_index));
+        return Quat::applyRotation(XYZ::slope(XYZ(0,0,0), lens->at(p_x, p_y, sample_index) + focal_position),rotation);
     }
 
     Camera* clone() {
@@ -2406,21 +3141,31 @@ struct Casting_Diagnostics {
     chrono::nanoseconds duration;
 };
 
+class PackagedScene {
+public:
+    vector<PackagedSphere> sphere_data; //stores primitives in a more packed data format for better cache optimizations.
+    vector<PackagedPlane> plane_data; //Ive made quite a few mistakes throughout this project but I think Im finally on track with this
+    vector<PackagedTri> tri_data;
+    vector<PTri_AVX> avx_tri_data;
+    vector<PointLikeLight> lights;
+    vector<PackagedTri*> emissive_tris;
+    PackagedBVH* flat_bvh = nullptr;
+    vector<BVH_AVX> avx_bvh;
+    short monte_carlo_generations = 2;
+    short max_generations = 3;
+    short monte_carlo_max = 256;
+    float monte_carlo_modifier = 1.0/32;
+};
+
 class Scene {
 public:
 
-    //Im trying something here. Im going to organize objects into groups, and then explicitly process each one when casting. Pain the ass for me, but in theory it makes for cleaner execution and code.
-    //my justification here is that polymorphism can make for some really just nasty fucking code. Doing this will force me to make more modular code and more explicit optimizations.
-    //C++ just wasnt made to be flexible :(
-
     int object_count = 0;
     int primitive_count = 0;
-    vector<Sphere*> spheres;
-    vector<Plane*> planes;
-    vector<Tri*> tris;
-    vector<Object*> objects;
 
+    vector<Object*> objects;
     vector<Camera*> cameras;
+    Camera* camera;
 
     vector<PointLikeLight*> pointlike_lights;
 
@@ -2428,124 +3173,280 @@ public:
     int current_resolution_y;
     Scene() {}
 
-    void register_sphere(Sphere* sphere) {
-        object_count++;
-        primitive_count++;
-        sphere->material->prep();
-        spheres.push_back(sphere);
-        if (sphere->material->emissive.getSingle(0, 0) > 0) {
-            pointlike_lights.push_back(new PointLikeLight(sphere->origin, sphere->radius, (Primitive*)sphere));
-        }
-    }
-
-    void register_plane(Plane* plane) {
-        object_count++;
-        primitive_count++;
-        plane->material->prep();
-        planes.push_back(plane);
-    }
-
-    void register_tri(Tri* tri) {
-        object_count++;
-        primitive_count++;
-        tri->material->prep();
-        tris.push_back(tri);
-    }
-
     void register_object(Object* obj) {
         object_count++;
         for (Mesh* M : obj->meshes) {
-            M->prep();
             primitive_count += M->primitive_count;
         }
         objects.push_back(obj);
     }
-
-
-private:
-
-};
-
-class RayEngine {
-public:
-    vector<PackagedSphere> sphere_data; //stores primitives in a more packed data format for better cache optimizations.
-    vector<PackagedPlane> plane_data; //Ive made quite a few mistakes throughout this project but I think Im finally on track with this
-    vector<PackagedTri> tri_data;
-    vector<PointLikeLight> lights;
-
-    BVH* test_bvh = new BVH();
-    PackagedBVH* flat_bvh = nullptr;
-    vector<PackagedTri>* flat_bvh_tris;
-
-    RayEngine() {}
-    void prep() {
+    void register_camera(Camera* cam){
+        cameras.push_back(cam);
     }
-    void load_scene_objects(Scene* scene) {
-        vector<Tri*> tris;
-        for (auto s : scene->spheres) {
-            sphere_data.push_back(PackagedSphere(*s));
+    void merge(Scene& mergee) {
+        for (Object* O : mergee.objects) {
+            objects.push_back(O);
         }
-        for (auto p : scene->planes) {
-            plane_data.push_back(PackagedPlane(*p));
+        for (Camera* cam : mergee.cameras) {
+            cameras.push_back(cam);
         }
-        for (auto t : scene->tris) {
-            tri_data.push_back(t->pack());
-            tris.push_back(t);
+    }
+
+    void prep(int res_x, int res_y, int subdiv_count) {
+        auto start = chrono::high_resolution_clock::now();
+        cout << padString("[Scene] Prepping", ".", 100) << flush;
+        for (Object* O : objects) {
+            O->prep();
         }
-        for (auto O : scene->objects) {
-            Transformation final_transform = O->final_transform();
-            for (Mesh* M : O->meshes) {
-                for (Tri& T : M->tris) {
-                    tri_data.push_back(Packers::transformedPack(T, final_transform, O->origin, O->scale));
-                    tris.push_back(new Tri(Packers::transformT(T,final_transform,O->origin,O->scale)));
-                }
-            }
+        camera = cameras[0];
+        for (Camera* camera : cameras) {
+            camera->prep(res_x, res_y, subdiv_count);
         }
-        for (auto PLL : scene->pointlike_lights) {
-            lights.push_back(*PLL);
+        auto end = chrono::high_resolution_clock::now();
+        cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(end - start).count() << "ms]" << endl;
+    }
+
+    PackagedScene* package() {
+        vector<Sphere> spheres;
+        vector<Plane> planes;
+        vector<Tri> tris;
+        BVH* bvh = new BVH();
+        
+
+        PackagedScene* PS = new PackagedScene();
+
+        auto data_group_start = chrono::high_resolution_clock::now();
+        cout << padString("[Scene] Regrouping data", ".", 100) << flush;
+
+        for (auto O : objects) {
+            O->fetchData(spheres, planes, tris);
         }
+        for (Sphere& S : spheres) {
+            PS->sphere_data.push_back(PackagedSphere(S));
+        }
+        for (Plane& P : planes) {
+            PS->plane_data.push_back(PackagedPlane(P));
+        }
+
+        auto data_group_end = chrono::high_resolution_clock::now();
+        cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(data_group_end - data_group_start).count() << "ms]" << endl;
+
+        //for (int i = 0; i < tris.size();i++) {
+        //    Tri T = tris[i];
+        //    cout << "triangle(" << T.p1.to_string() << "," << T.p2.to_string() << "," << T.p3.to_string() << ")" << endl;
+        //}
+
         if (tris.size() > 0) {
             auto BVH_con_start = chrono::high_resolution_clock::now();
             cout << padString("[BVH] Constructing", ".", 100) << flush;
-            test_bvh->construct(new vector<Tri*>(tris));
+
+            bvh->construct_dangerous(tris); //note, this will cause the BVH to break when tris moves out of scope
+
             auto BVH_con_end = chrono::high_resolution_clock::now();
             cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_con_end - BVH_con_start).count() << "ms]" << endl;
-
-            auto BVH_prep_start = chrono::high_resolution_clock::now();
-            cout << padString("[BVH] Prepping", ".", 100) << flush;
-            test_bvh->prep();
-            auto BVH_prep_end = chrono::high_resolution_clock::now();
-            cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_prep_end - BVH_prep_start).count() << "ms]" << endl;
-
             auto BVH_collapse_start = chrono::high_resolution_clock::now();
             cout << padString("[BVH] Flattening", ".", 100) << flush;
-            auto collapse_out = PackagedBVH::collapse(test_bvh);
-            flat_bvh = collapse_out.first;
-            flat_bvh_tris = collapse_out.second;
+#if USE_AVX_BVH
+            auto collapse_out = BVH_AVX::collapse(bvh);
+            PS->avx_bvh = *collapse_out.first;
+            PS->tri_data = *collapse_out.second;
+
+#else
+            auto collapse_out = PackagedBVH::collapse(bvh);
+            PS->flat_bvh = collapse_out.first;
+            PS->tri_data = *collapse_out.second;
+#endif
+            delete bvh;
+
+#if USE_AVX_TRI
+            map<int,pair<BVH_AVX*,int>> order;
+            for (int i = 0; i < PS->avx_bvh.size(); i++) {
+                BVH_AVX& current = PS->avx_bvh[i];
+                for (int i = 0; i < 8; i++) {
+                    int leaf_size = current.leaf_size[i];
+                    int index = current.indexes[i];
+                    if (leaf_size > 0) {
+                        order[index] = pair<BVH_AVX*,int>(& current,i);
+                    }
+                }
+            }
+            for (auto iter = order.begin(); iter != order.end(); ++iter)
+            {
+                int index = iter->first;
+                auto datapoint = iter->second;
+                BVH_AVX& current = *datapoint.first;
+                int selection_index = datapoint.second;
+                int leaf_size = current.leaf_size[selection_index];
+                current.indexes[selection_index] = PS->avx_tri_data.size();
+                current.leaf_size[selection_index] = ceil(((float)leaf_size) / 8.0);
+                int i = 0;
+                while (i < ceil(((float)leaf_size) /8.0)) {
+                    vector<PackagedTri> PTris;
+                    for (int j = 0; j < 8 && i*8+j<leaf_size; j++) {
+                        PTris.push_back(PS->tri_data[index + 8 * i + j]);
+                    }
+                    PS->avx_tri_data.push_back(PTri_AVX(PTris));
+                    i++;
+                }
+            }
+#endif
             auto BVH_collapse_end = chrono::high_resolution_clock::now();
             cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_collapse_end - BVH_collapse_start).count() << "ms]" << endl;
+        }
+        return PS;
+    }
+};
+#define AVX_STACK_SIZE 256
+
+volatile int global_counter = 0;
+class RayEngine {
+public:
+    PackagedScene* data;
+    RayEngine() {}
+    void load_scene(PackagedScene* PS) {
+        data = PS;
+    }
+    void iterativeBVH_AVX(CastResults& res, const XYZ& position, const XYZ& slope) {
+        //global_counter++;
+        m256_vec3 position_avx(position);
+        m256_vec3 slope_avx(slope);
+        m256_vec3 fusedposition(-1*position/slope);
+        m256_vec3 inv_slope(1 / slope);
+        int stack[AVX_STACK_SIZE];
+        float distances[AVX_STACK_SIZE];
+        int tri_count[AVX_STACK_SIZE];
+        int stack_index = 0;
+        stack[0] = 0;
+        distances[0] = 0;
+        tri_count[0] = 0;
+        while (stack_index >= 0) {
+            const float dist = distances[stack_index];
+            const int self_triangles = tri_count[stack_index];
+            if (dist >= res.distance) {
+                stack_index--;
+                continue;
+            };
+            if (self_triangles == 0) {
+                const BVH_AVX& current = data->avx_bvh[stack[stack_index]];
+                stack_index--;
+                auto m256_results = current.intersection(fusedposition, inv_slope);
+                //float results[8];
+                float* results = (float*)&m256_results;
+                //for (int i = 0; i < 8;i++) {
+                //    XYZ max = current.max.at(i);
+                //    XYZ min = current.min.at(i);
+                //    float t = BVH::intersection(max, min, position, 1 / slope);
+                //    results[i] = t;
+                //}
+                int sorted_index[8];
+                int sorted_index_size = 0;
+                for (int i = 0; i < 8; i++) {
+                    float& num = results[i];
+                    if (num > 0) {
+                        int j = sorted_index_size - 1;
+                        for (; j >= 0; j--) {
+                            if (results[sorted_index[j]] > num) {
+                                sorted_index[j + 1] = sorted_index[j];
+                            }
+                            else break;
+                        }
+                        sorted_index[j + 1] = i;
+                        sorted_index_size++;
+                    }
+                }
+                for (int i = sorted_index_size-1; i >= 0; i--) {
+                    int selection_index = sorted_index[i];
+                    float dist2 = results[selection_index];
+                    if (dist2 <= 0) {
+                        continue;
+                    }
+                    stack_index++;
+                    stack[stack_index] = current.indexes[selection_index];
+                    distances[stack_index] = dist2;
+                    tri_count[stack_index] = current.leaf_size[selection_index];
+                    
+                }
+            }
+            else {
+                int start_index = stack[stack_index];
+                stack_index--;
+                for (int i = 0; i < self_triangles; i++) {
+#if !USE_AVX_TRI
+
+                    const PackagedTri& t = (data->tri_data)[i + start_index];
+                    XYZ distance = Tri::intersection_check_MoTru(t, position, slope);
+                    if (distance.X >= 0) {
+                        if (distance.X < res.distance) {
+                            res.distance = distance.X;
+                            res.normal = Tri::get_normal(t.normal, position + distance * slope * 0.99 - t.origin_offset);
+                            res.material = t.material;
+                            res.UV = distance;
+                        }
+                    }
+#else
+
+                    const PTri_AVX& PTri_AVX_pack = (data->avx_tri_data)[i + start_index];
+                    m256_vec3 intersection_stats;
+                    m256_vec3 normal_stats;
+                    //vector<PackagedTri> pTris;
+                    //vector<XYZ> real_res;
+                    //vector<XYZ> real_normal;
+                    //for (int l = 0; l < 8; l++) {
+                    //    PackagedTri pTri = PackagedTri();
+                    //    pTri.p1 = PTri_AVX_pack.p1.at(l);
+                    //    pTri.p1p2 = PTri_AVX_pack.p1p2.at(l);
+                    //    pTri.p1p3 = PTri_AVX_pack.p1p3.at(l);
+                    //    pTri.normal = PTri_AVX_pack.normal.at(l);
+                    //    pTri.origin_offset = PTri_AVX_pack.origin_offset.at(l);
+                    //    pTri.UV_basis = PTri_AVX_pack.UV_basis.at(l);
+                    //    pTri.U_delta = PTri_AVX_pack.U_delta.at(l);
+                    //    pTri.V_delta = PTri_AVX_pack.V_delta.at(l);
+                    //    pTri.material = PTri_AVX_pack.materials[l];
+                    //    real_res.push_back(Tri::intersection_check(pTri, position, slope));
+                    //    real_normal.push_back(Tri::get_normal(pTri.normal, position - pTri.origin_offset));
+                    //    pTris.push_back(pTri);
+                    //}
+
+                    PTri_AVX::intersection_check(PTri_AVX_pack, position_avx, slope_avx, intersection_stats);
+                    PTri_AVX::get_normal(PTri_AVX_pack, position_avx, normal_stats);
+                    
+                    float* dists = (float*) &intersection_stats.X;
+                    for (int i = 0; i < 8; i++) {
+                        if (dists[i] > 0 && dists[i] < res.distance) {
+                            res.distance = dists[i];
+                            res.normal =   normal_stats.at(i);
+                            res.material = PTri_AVX_pack.materials[i];
+                            res.UV = intersection_stats.at(i);
+                        }
+                    }
+#endif
+                }
+
+            }
         }
     }
     void iterativeBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
         int stack[64];
+        float dist[64];
         int stack_index = 0;
         stack[0] = 0;
         while (stack_index >= 0) {
-            const PackagedBVH& current = flat_bvh[stack[stack_index]];
+            const PackagedBVH& current = data->flat_bvh[stack[stack_index]];
             stack_index--;
+            if (dist[stack_index+1] > res.distance) continue;
             //if (distance <= 0 || distance >= res.distance) {
             //    continue;
             //}
             if (current.leaf_size == 0) {
                 int c1_index = current.index;
                 int c2_index = c1_index + 1;
-                const PackagedBVH& c1 = flat_bvh[c1_index];
-                const PackagedBVH& c2 = flat_bvh[c2_index];
+                const PackagedBVH& c1 = data->flat_bvh[c1_index];
+                const PackagedBVH& c2 = data->flat_bvh[c2_index];
                 decimal t1 = BVH::intersection(c1.sMax, c1.sMin, position, inv_slope);
                 decimal t2 = BVH::intersection(c2.sMax, c2.sMin, position, inv_slope);
 
-                bool f1 = t1 < 0 || t1>res.distance;
-                bool f2 = (t2 < 0 || t2>res.distance);
+                bool f1 = t1<0;//t1 < 0 || t1>res.distance;
+                bool f2 = t2<0;//(t2 < 0 || t2>res.distance);
 
                 if (f1 && f2) {
                     continue;
@@ -2553,34 +3454,40 @@ public:
                 if (f1) {
                     stack_index++;
                     stack[stack_index] = c2_index;
+                    dist[stack_index] = t2;
                     continue;
                 }
                 if (f2) {
                     stack_index++;
                     stack[stack_index] = c1_index;
+                    dist[stack_index] = t1;
                     continue;
                 }
                 if (t1 < t2) {
                     stack_index++;
                     stack[stack_index] = c2_index;
+                    dist[stack_index] = t2;
                     stack_index++;
                     stack[stack_index] = c1_index;
+                    dist[stack_index] = t1;
                 }
                 else {
                     stack_index++;
                     stack[stack_index] = c1_index;
+                    dist[stack_index] = t1;
                     stack_index++;
                     stack[stack_index] = c2_index;
+                    dist[stack_index] = t2;
                 }  
             }
             else {
                 for (int i = 0; i < current.leaf_size; i++) {
-                    const PackagedTri& t = (*flat_bvh_tris)[i+current.index];
+                    const PackagedTri& t = (data->tri_data)[i+current.index];
                     XYZ distance = Tri::intersection_check(t, position, slope);
                     if (distance.X >= 0) {
                         if (distance.X < res.distance) {
                             res.distance = distance.X;
-                            res.normal = Tri::get_normal(t.normal, position);
+                            res.normal = Tri::get_normal(t.normal, position+distance*slope*0.99-t.origin_offset);
                             res.material = t.material;
                             res.UV = distance;
                         }
@@ -2590,15 +3497,15 @@ public:
         }
     }
     void navBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
-        const PackagedBVH& top = flat_bvh[0];
-        //navFlatBVHI(0, res, position, slope, inv_slope);
+        #if USE_AVX_BVH
+        iterativeBVH_AVX(res, position, slope);
+        #else
         iterativeBVH(res, position, slope, inv_slope);
-        //navRawBVH(test_bvh, res, position, slope, inv_slope);
-
+        #endif
     }
     CastResults execute_bvh_cast(XYZ& position, const XYZ& slope) {
         CastResults returner;
-        for (const PackagedSphere& s : sphere_data) {
+        for (const PackagedSphere& s : data->sphere_data) {
             decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
             if (distance >= 0) {
                 if (distance < returner.distance) {
@@ -2608,7 +3515,7 @@ public:
                 }
             }
         }
-        for (const PackagedPlane& p : plane_data) {
+        for (const PackagedPlane& p : data->plane_data) {
             decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
             if (distance >= 0) {
                 if (distance < returner.distance) {
@@ -2620,14 +3527,14 @@ public:
         }
         XYZ inv_slope = XYZ(1) / slope;
         navBVH(returner, position, slope, inv_slope);
-        position += returner.distance * slope;
+        position += returner.distance * slope*0.999;
         return returner;
     }
     CastResults execute_naive_cast(XYZ& position,const XYZ& slope) {
         #define default_smallest_distance 9999999;
         decimal smallest_distance = default_smallest_distance;
         CastResults returner = CastResults(XYZ(-1,-1,-1),nullptr);
-        for (const PackagedSphere& s : sphere_data) {
+        for (const PackagedSphere& s : data->sphere_data) {
             decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
             if (distance >= 0) {
                 if (distance < returner.distance) {
@@ -2637,7 +3544,7 @@ public:
                 }
             }
         }
-        for (const PackagedPlane& p : plane_data) {
+        for (const PackagedPlane& p : data->plane_data) {
             decimal distance = Plane::intersection_check(p.normal, p.origin_offset, position, slope);
             if (distance >= 0) {
                 if (distance < returner.distance) {
@@ -2647,12 +3554,12 @@ public:
                 }
             }
         }
-        for (const PackagedTri& t : tri_data) {
+        for (const PackagedTri& t : data->tri_data) {
             XYZ distance = Tri::intersection_check(t, position, slope);
             if (distance.X >= 0) {
                 if (distance.X < returner.distance) {
                     returner.distance = distance.X;
-                    returner.normal = Tri::get_normal(t.normal,position);
+                    returner.normal = Tri::get_normal(t.normal, position + distance * slope * 0.99 - t.origin_offset);
                     returner.material = t.material;
                 }
             }
@@ -2661,17 +3568,12 @@ public:
         return returner;
     }
     CastResults execute_ray_cast(XYZ& position, const XYZ& slope) {
-        if (flat_bvh != nullptr) {
-            return execute_bvh_cast(position, slope);
-        }
-        else {
-        return execute_naive_cast(position,slope);
-        }
+        return execute_bvh_cast(position, slope);
+        //return execute_naive_cast(position,slope);
         
     }
     void process_ray(Casting_Diagnostics& stats, PackagedRay& ray_data) {
         stats.rays_processed++;
-        XYZ start = ray_data.position;
         CastResults results = execute_ray_cast(ray_data.position, ray_data.slope);
         //*ray_data.output += ray_data.coefficient * ((results.normal)+1)/2;
         if (DEPTH_VIEW) {
@@ -2679,7 +3581,7 @@ public:
             return;
         }
         if (results.material == nullptr) {
-            (*ray_data.output) += ray_data.coefficient * XYZ(0, 0, 0);
+            (*ray_data.output) += ray_data.coefficient * XYZ(0);
         }
         else {
             MaterialSample material = results.material->sample_UV(results.UV.Y,results.UV.Z);
@@ -2699,7 +3601,7 @@ public:
                 }
             }
             if (DRAW_NORMAL) {
-                (*ray_data.output) += normal/2+XYZ(0.5,0.5,0.5);
+                (*ray_data.output) += ray_data.coefficient*(normal/2+XYZ(0.5,0.5,0.5))*10;
                 return;
             }
             if (DRAW_COLOR) {
@@ -2710,11 +3612,17 @@ public:
                 (*ray_data.output) += material.emissive;
                 return;
             }
-
+            //if (DRAW_BOUNCE_DIRECTION) {
+            //    if (ray_data.remaining_monte_carlo == 0)
+            //        (*ray_data.output) += ray_data.coefficient * (ray_data.position / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+            //    //continue;
+            //}
             (*ray_data.output) += ray_data.coefficient * material.calculate_emissions();
+            if (ray_data.generation == 2) {
+                //(*ray_data.output) += ray_data.coefficient * (ray_data.position / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+            }
 
-            int bounce_count = ray_data.monte_diffuse;
-            int shadow_count = ray_data.monte_shadow;
+            int bounce_count = data->monte_carlo_max*pow(data->monte_carlo_modifier,ray_data.generation);
             XYZ flipped_output = XYZ::flip(ray_data.slope);
             XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), normal);
 
@@ -2724,8 +3632,8 @@ public:
             Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
             //ray_data.PreLL.value = XYZ(0, 0, 100);
             
-            if (ray_data.remaining_bounces > 0) {
-                if (ray_data.remaining_monte_carlo > 0) {
+            if (ray_data.generation < data->max_generations) {
+                if (ray_data.generation < data->monte_carlo_generations) {
                     float diffuse_split = 1;
                     float specular_split = 1 - diffuse_split;
                     int diffuse_bounces = bounce_count * diffuse_split;
@@ -2741,11 +3649,11 @@ public:
                     
 
                     for (int i = 0; i < diffuse_bounces; i++) {
-                        if (i % diffuse_Rslices == 0 && i != 0) {
-                            diffuse_V_position+=diffuse_V_increment;
-                        }
-                        diffuse_R_position += diffuse_R_increment;
-                        if (diffuse_R_position > 1) diffuse_R_position -= 1;
+                        //if (i % diffuse_Rslices == 0 && i != 0) {
+                        //    diffuse_V_position+=diffuse_V_increment;
+                        //}
+                        //diffuse_R_position += diffuse_R_increment;
+                        //if (diffuse_R_position > 1) diffuse_R_position -= 1;
                         //XYZ diffuse_slope = material.biased_diffuse_bounce(
                         //    normal_rot_m
                         //    ,diffuse_V_position
@@ -2756,48 +3664,27 @@ public:
                         XYZ diffuse_slope = material.biased_diffuse_bounce(
                             normal_rot_m
                         );
+                        if (DRAW_BOUNCE_DIRECTION) {
+                            if(ray_data.generation==1)
+                                (*ray_data.output) += ray_data.coefficient/diffuse_bounces * (diffuse_slope / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+                            //continue;
+                        }
+                        
                         //XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, diffuse_slope, flipped_output);
-
-                        XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal,diffuse_slope));
-                        if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
+                        XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal, diffuse_slope));
+                        if (XYZ::magnitude(return_coefficient)<0.0000001) {
                             continue;
                         }
                         return_coefficient = return_coefficient / bounce_count * diffuse_split;
                         auto ray = PackagedRay(
-                            ray_data.position + NEAR_THRESHOLD * results.normal * 10,
+                            ray_data.position + 0.001 * results.normal,
                             diffuse_slope,
                             return_coefficient,
                             ray_data.output,
-                            ray_data.remaining_bounces - 1,
-                            ray_data.remaining_monte_carlo - 1,
-                            ray_data.monte_diffuse / 4,
-                            max(1, ray_data.monte_shadow / 4),
-                            true
+                            ray_data.generation+1
                         );
                         stats.diffuses_cast++;
-                        //(*ray_data.output) += diffuse_slope * 2 + 0.5;
                         process_ray(stats, ray);
-                    }
-                    for (int i = 0; i < bounce_count*specular_split; i++) {
-                        XYZ specular_slope = material.reflective_bounce(reflection_rot_m);
-                        XYZ return_coefficient = ray_data.coefficient * material.specular_BRDF(normal, specular_slope, flipped_output);
-                        if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
-                            continue;
-                        }
-                        return_coefficient = return_coefficient / bounce_count * specular_split;
-                        auto ray = PackagedRay(
-                            ray_data.position + NEAR_THRESHOLD * results.normal * 10,
-                            specular_slope,
-                            return_coefficient,
-                            ray_data.output,
-                            ray_data.remaining_bounces - 1,
-                            ray_data.remaining_monte_carlo - 1,
-                            ray_data.monte_diffuse / 4,
-                            max(1, ray_data.monte_shadow / 4),
-                            true
-                        );
-                        process_ray(stats, ray);
-                        stats.diffuses_cast++;
                     }
                 }
                 else {
@@ -2810,56 +3697,13 @@ public:
                         reflection_slope,
                         return_coefficient,
                         ray_data.output,
-                        ray_data.remaining_bounces - 1,
-                        0,
-                        0,
-                        1,
-                        true
+                        ray_data.generation+1
                     );
-                    //enqueue_ray(ray);
                     process_ray(stats, ray);
 
                     stats.reflections_cast++;
                 }
             }
-            if (shadow_count>0) {
-                for (const PointLikeLight& PLL : lights) {
-                    XYZ light_slope = XYZ::slope(ray_data.position, PLL.origin);
-                    Quat light_rot = Quat::makeRotationFromY(light_slope);
-                    Matrix3x3 light_rot_m = Matrix3x3::quatToMatrix(light_rot);
-                    decimal distance = XYZ::distance(ray_data.position, PLL.origin);
-                    decimal half_arc = atan(PLL.radius / distance);
-                    XYZ light_falloff_coefficient = ray_data.coefficient / (4 * PI * distance * distance);
-                    XYZ output = XYZ(0, 0, 0);
-                    for (int i = 0; i < shadow_count; i++) {
-                        XYZ cast_slope;
-                        if (shadow_count > 1) {
-                            cast_slope = Matrix3x3::aligned_random(half_arc, light_rot_m);
-                        }
-                        else {
-                            cast_slope = light_slope;
-                        }
-                        XYZ return_coefficient = light_falloff_coefficient * material.fast_BRDF_co(normal, cast_slope, flipped_output);
-                        if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
-                            continue;
-                        }
-                        if (shadow_count > 1) {
-                            return_coefficient = return_coefficient / (shadow_count);
-                        }
-                        XYZ start_position = ray_data.position + NEAR_THRESHOLD * results.normal * 1.1;
-                        CastResults res = execute_ray_cast(start_position, cast_slope);
-                        if (res.material != nullptr) {
-                            *ray_data.output += return_coefficient * res.material->emissive.getXYZ(res.UV.X,res.UV.Y);
-                            //output += return_coefficient * res.material->calculate_emissions();
-                        }
-                      
-                        
-                        stats.shadows_cast++;
-                    }
-                    //*ray_data.output += output;
-                }
-            }
-
         }
     }
 };
@@ -3042,20 +3886,10 @@ public:
         }
     }
 };
-
 namespace ImageHandler {
-    XYZ post_process_pixel(XYZ luminence,int pre_scaled_gain, int post_scaled_gain) {
-        XYZ scaled_return = luminence * pre_scaled_gain;
-        decimal scalar_value = scaled_return.magnitude();
-        //scaled_return = scaled_return * Filmic_curve(scalar_value);
-        //scaled_return = scaled_return*log10(luminance(scaled_return) + 1) / luminance(scaled_return) * post_scaled_gain;//maybe more correct? dunno.
-        scaled_return = XYZ::log(scaled_return + 1) * post_scaled_gain;
-        //scaled_return = ACESFitted(scaled_return);
-        //scaled_return = FastACES(scaled_return);
-        //scaled_return = reinhard_extended_luminance(scaled_return, 200);
-        scaled_return = XYZ::clamp(scaled_return, 0, 1) * 255;
-        return scaled_return;
-    }
+    OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromFile("C:\\Users\\Charlie\\Libraries\\OCIOConfigs\\AgX-main\\config.ocio");
+    OCIO::ConstProcessorRcPtr processor = config->getProcessor(OCIO::ROLE_SCENE_LINEAR, OCIO::ROLE_COLOR_PICKING);
+    auto compute = processor->getDefaultCPUProcessor();
     static decimal luminance(XYZ v)
     {
         return XYZ::dot(v, XYZ(0.2126, 0.7152, 0.0722));
@@ -3096,7 +3930,7 @@ namespace ImageHandler {
 
         color = Matrix3x3::multiply_horizontally(ACESOutputMat, color);
 
-        return color;
+        return XYZ::clamp(color,0,1)*255;
     }
     static XYZ FastACES(XYZ x) {
         decimal a = 2.51;
@@ -3104,7 +3938,21 @@ namespace ImageHandler {
         decimal c = 2.43;
         decimal d = 0.59;
         decimal e = 0.14;
-        return (x * (a * x + b)) / (x * (c * x + d) + e);
+        return XYZ::clamp((x * (a * x + b)) / (x * (c * x + d) + e),0,1)*255;
+    }
+    XYZ post_process_pixel(XYZ luminence, int pre_scaled_gain, int post_scaled_gain) {
+        XYZ scaled_return = luminence * pre_scaled_gain;
+        decimal scalar_value = scaled_return.magnitude();
+        //scaled_return = scaled_return * Filmic_curve(scalar_value);
+        //scaled_return = scaled_return*log10(luminance(scaled_return) + 1) / luminance(scaled_return) * post_scaled_gain;//maybe more correct? dunno.
+        scaled_return = XYZ::log(scaled_return + 1) * post_scaled_gain;
+        //scaled_return = ACESFitted(scaled_return);
+        //scaled_return = FastACES(scaled_return);
+        //scaled_return = reinhard_extended_luminance(scaled_return, 200);
+        scaled_return = XYZ::clamp(scaled_return, 0, 1) * 255;
+        float pixel[3] = { luminence[0],luminence[1],luminence[2]};
+        compute->applyRGB(pixel);
+        return XYZ::clamp(XYZ(pixel[0],pixel[1],pixel[2]),0,1) * 255;//scaled_return;
     }
     static void postProcessRaw(vector<vector<XYZ*>>* data) {
         for (vector<XYZ*>& data_row : *data) {
@@ -3176,10 +4024,6 @@ public:
 
         XYZ emit_coord;
         XYZ starting_coefficient;
-        int max_bounces = 1;
-        int monte_bounce_count = 1;
-        int diffuse_emit_count = 64;
-        int lighting_emit_count = 64;
 
 
         void add_casts() {
@@ -3243,11 +4087,7 @@ public:
                     ray_slope,
                     process_info->starting_coefficient,
                     output_link,
-                    process_info->max_bounces,
-                    process_info->monte_bounce_count,
-                    process_info->diffuse_emit_count,
-                    process_info->lighting_emit_count,
-                    true
+                    0
                 );
                 process_info->RE->process_ray(process_info->CD, ray);
                 process_info->add_casts();
@@ -3275,7 +4115,6 @@ public:
 
 class SceneManager {
 public:
-    Camera* camera;
     Scene* scene;
     RayEngine RE;
     GUIHandler GUI;
@@ -3288,15 +4127,14 @@ public:
     int current_resolution_y = 0;
     int subdivision_count = 0;
     int current_samples_per_pixel = 0;
-    const int block_size = 4;
+    const int block_size = 8;
 
     int y_increment;
     int x_increment;
 
     chrono::steady_clock::time_point render_start;
 
-    SceneManager(Camera* _camera, Scene* _scene):
-    camera(_camera), scene(_scene){}
+    SceneManager(Scene* _scene): scene(_scene){}
 
     void render(int resolution_x, int resolution_y, int _subdivision_count = 1) {
         current_resolution_x = resolution_x;
@@ -3339,12 +4177,8 @@ private:
             raw_output.push_back(row);
         }
 
-        camera->prep(current_resolution_x, current_resolution_y, subdivision_count);
-        RE.load_scene_objects(scene);
-        RE.prep();
-       
-
-        
+        scene->prep(current_resolution_x, current_resolution_y, subdivision_count);
+        RE.load_scene(scene->package());
         
         auto prep_end = chrono::high_resolution_clock::now();
 
@@ -3371,12 +4205,15 @@ private:
             }
         }
         time_point last_refresh = chrono::high_resolution_clock::now();
-        long long parent_rays_last = 0;
-        long long child_rays_last = 0;
         long long parent_rays = 0;
         long long child_rays = 0;
-        long long pixels_done = 0;
+        long long parent_rays_last = 0;
+        long long child_rays_last = 0;
         double percent_last = 0;
+        long long pixels_done = 0;
+        vector<long long> parent_rays_rate_history(120,0);
+        vector<long long> child_rays_rate_history(120,0);
+        vector<double> percent_rate_history(300,0);
         while (true) {
             parent_rays = 0;
             child_rays = 0;
@@ -3432,31 +4269,58 @@ private:
                 int milli_delta = micro_delta / 1000;
                 double second_ratio = ((double)1000000) / micro_delta;
 
+                long long total_pixels = current_resolution_x * current_resolution_y;
+                double percent = ((double)pixels_done) / total_pixels;
+                double percent_done = percent * 100;
+                double percent_rate = (percent_done - percent_last) * second_ratio;
+                percent_last = percent_done;
+
+
                 long long delta_parent = parent_rays - parent_rays_last;
                 long long delta_child = child_rays - child_rays_last;
-                long long delta_total = delta_parent + delta_child;
+
+                long long parent_rate = delta_parent * second_ratio;
+                long long child_rate = delta_child * second_ratio;
 
                 parent_rays_last = parent_rays;
                 child_rays_last = child_rays;
 
+                percent_rate_history.push_back(percent_rate);
+                percent_rate_history.erase(percent_rate_history.begin());
+                parent_rays_rate_history.push_back(parent_rate);
+                parent_rays_rate_history.erase(parent_rays_rate_history.begin());
+                child_rays_rate_history.push_back(child_rate);
+                child_rays_rate_history.erase(child_rays_rate_history.begin());
+                
+                double percent_rate_average = 0;
+                long long parent_rate_average = 0;
+                long long child_rate_average = 0;
+
+                for (int i = 0; i < parent_rays_rate_history.size(); i++) {
+                    parent_rate_average += parent_rays_rate_history[i];
+                }
+                parent_rate_average /= parent_rays_rate_history.size();
+                for (int i = 0; i < child_rays_rate_history.size(); i++) {
+                    child_rate_average += child_rays_rate_history[i];
+                }
+                child_rate_average /= child_rays_rate_history.size();
+                for (int i = 0; i < percent_rate_history.size(); i++) {
+                    percent_rate_average += percent_rate_history[i];
+                }
+                percent_rate_average /= percent_rate_history.size();
+
                 parent_rays = 0;
                 child_rays = 0;
-
-                long long total_pixels = current_resolution_x * current_resolution_y;
-                double percent = ((double)pixels_done) / total_pixels;
-
                 pixels_done = 0;
 
-                string primary_per_sec = intToEng(second_ratio * delta_parent);
-                string secondary_per_sec = intToEng(second_ratio * delta_child);
-                string total_per_sec = intToEng(second_ratio * delta_total);
+                string primary_per_sec = intToEng(parent_rate_average);
+                string secondary_per_sec = intToEng(child_rate_average);
+                string total_per_sec = intToEng(parent_rate_average+child_rate_average);
 
-                double percent_done = percent * 100;
-                double percent_rate = (percent_done - percent_last)*second_ratio;
-                percent_last = percent_done;
+                
 
                 string format_string = "[%02i:%02i:%02i][%7ims] - ([%.5srays/s Primary][%.5srays/s Secondary])[%.5srays/s] - [%4.1f%% (+%4.3f/s)]\r";
-                printf(format_string.c_str(), hours, minutes, seconds, milli_delta, primary_per_sec.c_str(), secondary_per_sec.c_str(), total_per_sec.c_str(), percent_done, percent_rate);
+                printf(format_string.c_str(), hours, minutes, seconds, milli_delta, primary_per_sec.c_str(), secondary_per_sec.c_str(), total_per_sec.c_str(), percent_done, percent_rate_average);
 
                 GUI.commit_canvas();
                 GUI.handle_events();
@@ -3546,10 +4410,7 @@ private:
 
         XYZ emit_coord;
         XYZ starting_coefficient;
-        int max_bounces = 1;
-        int monte_bounce_count = 1;
-        int diffuse_emit_count = 64;
-        int lighting_emit_count = 64;
+
 
         struct hist_struct {
             double primary;
@@ -3641,7 +4502,7 @@ private:
     processing_info* create_process_config() {
         processing_info* process_info = new processing_info();
 
-        process_info->emit_coord = camera->focal_position + camera->position;
+        process_info->emit_coord = scene->camera->position;
         process_info->starting_coefficient = XYZ(1, 1, 1) / current_samples_per_pixel;
                     
         process_info->res_y = current_resolution_y;
@@ -3652,13 +4513,9 @@ private:
         process_info->samples_per_pixel = current_samples_per_pixel;
         process_info->pixels_per_block = block_size * block_size;
                     
-        process_info->camera = camera->clone();
+        process_info->camera = scene->camera->clone();
         process_info->raws = &raw_output;
                     
-        process_info->max_bounces = 4;
-        process_info->monte_bounce_count = 1;
-        process_info->diffuse_emit_count = 128 / current_samples_per_pixel;
-        process_info->lighting_emit_count = 128 / current_samples_per_pixel;
 
         return process_info;
     }
@@ -3667,7 +4524,7 @@ private:
 
         int max_bounces = 2;
 
-        process_info->emit_coord = camera->focal_position + camera->position;
+        process_info->emit_coord = scene->camera->position;
         process_info->starting_coefficient = XYZ(1, 1, 1) / current_samples_per_pixel;
 
         process_info->res_y = current_resolution_y;
@@ -3678,13 +4535,8 @@ private:
         process_info->samples_per_pixel = current_samples_per_pixel;
         process_info->pixels_per_block = block_size * block_size;
 
-        process_info->camera = camera;//camera->clone();
+        process_info->camera = scene->camera;//camera->clone();
         process_info->RE = &RE;
-        
-        process_info->max_bounces = max_bounces;
-        process_info->monte_bounce_count = 2;
-        process_info->diffuse_emit_count = 128;//1024*64 / current_samples_per_pixel;
-        process_info->lighting_emit_count = 0; // current_samples_per_pixel;
 
         return process_info;
     }
@@ -3701,11 +4553,7 @@ private:
                     ray_slope,
                     process_info.starting_coefficient,
                     output_link,
-                    process_info.max_bounces,
-                    process_info.monte_bounce_count,
-                    process_info.diffuse_emit_count,
-                    process_info.lighting_emit_count,
-                    true
+                    0
                 );
                 RE.process_ray(process_info.CD, ray);
                 process_info.add_casts();
@@ -3802,8 +4650,11 @@ public:
         return data;
     }
     static Mesh* loadObjFile(string fName, Material* mat) {
+        cout << padString("[File] Loading resource: " + fName, ".", 100);
         ifstream file(fName, ios::in);
-        return loadObj(file, mat);
+        Mesh* return_value = loadObj(file, mat);
+        cout << "[Done]" << endl;
+        return return_value;
     }
     static Mesh* loadObj(ifstream& file, Material* mat) {
         Mesh* mesh = new Mesh();
@@ -3899,6 +4750,7 @@ public:
         std::string err;
         std::string warn;
 
+        cout << padString("[File] Loading scene: " + fName, ".", 100);
         //bool ret = loader.LoadASCIIFromFile(&model, &err, &warn, argv[1]);
         bool ret = loader.LoadBinaryFromFile(&model, &err, &warn, fName); // for binary glTF(.glb)
 
@@ -3910,10 +4762,249 @@ public:
             throw exception("Failed to parse glTF\n");
         }
 
-        cout << "Loaded file";
+        SceneManager* out = parseGLTFData(model);
 
+        cout << "[Done]";
 
+        return out;
 
+    }
+    template<typename T> struct iterator_pair {
+        _Vector_iterator<_Vector_val<_Simple_types<T>>> begin;
+        _Vector_iterator<_Vector_val<_Simple_types<T>>> end;
+        T* begin_ptr;
+        iterator_pair() {}
+    };
+    struct buffer_accessor {
+        tinygltf::Model& data;
+        vector<char> swizzle;
+        buffer_accessor(tinygltf::Model& _data) : data(_data) {}
+        iterator_pair<unsigned char> get_buffer(int accessor_index) {
+            iterator_pair<unsigned char> returner;
+            auto& accessor = data.accessors[accessor_index];
+            auto& view = data.bufferViews[accessor.bufferView];
+
+            int buffer_index = view.buffer;
+            int start_index = view.byteOffset;
+            int end_index = start_index + view.byteLength;
+
+            auto& buffer = data.buffers[buffer_index];
+            returner.begin = buffer.data.begin() + start_index;
+            returner.end   = buffer.data.begin() + end_index;
+            returner.begin_ptr = &(*returner.begin);
+
+            return returner;
+
+        }
+        void get_float_data(int accessor_index, vector<float>& target) {
+            iterator_pair<unsigned char> iterators = get_buffer(accessor_index);
+            auto& accessor = data.accessors[accessor_index];
+            auto& view = data.bufferViews[accessor.bufferView];
+
+            assert(accessor.componentType == 5126);
+            assert(view.byteLength % 4 == 0);
+
+            target.clear();
+            target.resize(view.byteLength/4,0);
+            std::copy_n(reinterpret_cast<float*>(iterators.begin_ptr), target.size(), target.begin());
+        }
+        void get_ushort_data(int accessor_index, vector<unsigned short>& target) {
+            iterator_pair<unsigned char> iterators = get_buffer(accessor_index);
+            auto& accessor = data.accessors[accessor_index];
+            auto& view = data.bufferViews[accessor.bufferView];
+
+            assert(accessor.componentType == 5123);
+            assert(view.byteLength % 2 == 0);
+
+            target.clear();
+            target.resize(view.byteLength / 2, 0);
+            std::copy_n(reinterpret_cast<unsigned short*>(iterators.begin_ptr), target.size(), target.begin());
+        }
+        void get_uint_data(int accessor_index, vector<unsigned int>& target) {
+            iterator_pair<unsigned char> iterators = get_buffer(accessor_index);
+            auto& accessor = data.accessors[accessor_index];
+            auto& view = data.bufferViews[accessor.bufferView];
+
+            assert(accessor.componentType == 5125);
+            assert(view.byteLength % 4 == 0);
+
+            target.clear();
+            target.resize(view.byteLength / 4, 0);
+            std::copy_n(reinterpret_cast<unsigned int*>(iterators.begin_ptr), target.size(), target.begin());
+        }
+        void get_data_any_int(int accessor_index, vector<unsigned int>& target) {
+            auto& accessor = data.accessors[accessor_index];
+            vector<unsigned short> intermediate;
+            switch (accessor.componentType) {
+            case 5125:
+                get_uint_data(accessor_index, target);
+                break;
+            case 5123:
+                get_ushort_data(accessor_index, intermediate);
+                target.clear();
+                target.reserve(intermediate.size());
+                for (int i = 0; i < intermediate.size(); i++) {
+                    target.push_back((int)intermediate[i]);
+                }
+                break;
+            default:
+                assert(0);
+                break;
+            }
+        }
+        void get_vec_data(int accessor_index, vector<XYZ>& target) {
+            auto& accessor = data.accessors[accessor_index];
+            assert(accessor.type == 3);
+
+            vector<float> float_data;
+            get_float_data(accessor_index, float_data);
+            for (int i = 0; i < accessor.count; i++) {
+                target.push_back(XYZ(float_data[i * 3], float_data[i * 3 + 1], float_data[i * 3 + 2]));
+            }
+        }
+    };
+    static SceneManager* parseGLTFData(tinygltf::Model data) {
+        
+        Scene* scene = new Scene();
+        SceneManager* SM = new SceneManager(scene);
+        vector<Material*> materials;
+        vector<Mesh*> meshes;
+        vector<Camera*> cameras;
+        vector<Object*> objects;
+        map<int, pair<int,int>> node_lookup;
+        vector<char> swizzle = { 0,-2,1 };
+        vector<char> rot_swizzle = { 0,-2, 1, 3};
+        vector<char> scale_swizzle = { 0,2,1 };
+        buffer_accessor buf_accessor = buffer_accessor(data);
+        for (auto& material_data : data.materials) {
+            Material* mat = new Material();
+            auto pbr = material_data.pbrMetallicRoughness;
+            auto emissive = material_data.emissiveFactor;
+
+            mat->color.set_static(XYZ(pbr.baseColorFactor));
+            mat->metallic.set_static(pbr.metallicFactor);
+            mat->roughness.set_static(pbr.roughnessFactor);
+            mat->emissive.set_static(XYZ(emissive)*100);
+
+            if (material_data.extensions.count("KHR_materials_specular")) {
+                auto specular_iterator = material_data.extensions.find("KHR_materials_specular");
+                if (specular_iterator != material_data.extensions.end()) {
+                    auto specular_value = specular_iterator->second.Get("specularColorFactor");
+                    if (specular_value.Type() == 0) {
+                        mat->specular.set_static(0);
+                    }
+                    else {
+                        auto specular_0 = specular_value.Get(0).GetNumberAsDouble();
+                        auto specular_1 = specular_value.Get(1).GetNumberAsDouble();
+                        auto specular_2 = specular_value.Get(2).GetNumberAsDouble();
+                        mat->specular.set_static(XYZ(specular_0, specular_1, specular_2));
+                    }
+                }
+            }
+            materials.push_back(mat);
+        }
+        for (auto& model_data : data.meshes) {
+            auto& primitives = model_data.primitives;
+            Mesh* mesh = new Mesh();
+            mesh->name = model_data.name;
+            for (auto& primitive : primitives) {
+                auto& attributes = primitive.attributes;
+                Material* mat;
+                if (primitive.material > -1) {
+                    mat = materials[primitive.material];
+                }
+                else {
+                    mat = new Material();
+                }
+                
+
+                assert(attributes.count("POSITION") > 0);
+                auto  position_accessor_index = attributes["POSITION"];
+                auto& position_accessor = data.accessors[position_accessor_index];
+
+                vector<XYZ> position_data;
+                buf_accessor.get_vec_data(position_accessor_index, position_data);
+
+                assert(primitive.indices >= 0);
+                auto  indices_accessor_index = primitive.indices;
+                auto& indices_accessor = data.accessors[position_accessor_index];
+
+                vector<unsigned int> indices;
+                buf_accessor.get_data_any_int(indices_accessor_index, indices);
+
+                assert(indices.size() % 3 == 0);
+                int tri_count = indices.size()/3;
+                
+                mesh->tris.reserve(mesh->tris.size()+tri_count);
+                for (int i = 0; i < tri_count; i++) {
+                    XYZ v1 = position_data[indices[i * 3 + 0]].swizzle(swizzle);
+                    XYZ v2 = position_data[indices[i * 3 + 1]].swizzle(swizzle);
+                    XYZ v3 = position_data[indices[i * 3 + 2]].swizzle(swizzle);
+                    Tri T = Tri(v1, v2, v3, mat);
+                    mesh->addTri(T);
+                }
+            }
+            meshes.push_back(mesh);
+        }
+        for (auto& camera_data : data.cameras) {
+            assert(camera_data.type == "perspective");
+            auto& perspective = camera_data.perspective;
+            auto aspect_ratio = perspective.aspectRatio;
+            Lens* lens = new RectLens(1, aspect_ratio);
+            float distance = 0.5 / tan(0.5 * perspective.yfov);
+            Camera* camera = new Camera(XYZ(), lens, XYZ(0, distance, 0));
+            cameras.push_back(camera);
+        }
+        int node_index = -1;
+        for (auto& node_data : data.nodes) {
+            node_index++;
+            if (node_data.camera > -1) {
+                XYZ scale = XYZ(1);
+                XYZ translation = XYZ();
+                Quat rotation = Quat();
+                if (node_data.scale.size() > 0) scale = XYZ(node_data.scale,swizzle);
+                if (node_data.translation.size() > 0) translation = XYZ(node_data.translation,swizzle);
+                if (node_data.rotation.size() > 0) rotation = Quat(node_data.rotation,rot_swizzle);
+                cameras[node_data.camera]->position += translation;
+                cameras[node_data.camera]->rotation = rotation;
+                node_lookup[node_index] = pair<int, int>(0, node_data.camera);
+                continue;
+            }
+            if (node_data.mesh >= -1) {
+                XYZ scale = XYZ(1);
+                XYZ translation = XYZ();
+                Quat rotation = Quat();
+                if (node_data.scale.size() > 0) scale = XYZ(node_data.scale,scale_swizzle);
+                if (node_data.translation.size() > 0) translation = XYZ(node_data.translation,swizzle);
+                if (node_data.rotation.size() > 0) rotation = Quat(node_data.rotation,rot_swizzle);
+                Object* obj = new Object(XYZ(), scale);
+                obj->name = node_data.name;
+                obj->addMesh(meshes[node_data.mesh]);
+                obj->_registerRotation(rotation);
+                obj->_registerMove(translation);
+                objects.push_back(obj);
+                node_lookup[node_index] = pair<int,int>(1, objects.size() - 1);
+                continue;
+            }
+        }
+        int default_scene = data.defaultScene;
+        auto scene_data = data.scenes[default_scene];
+        for (auto& node_index : scene_data.nodes) {
+            auto& node_register = node_lookup[node_index];
+            int node_type = node_register.first;
+            int lookup_index = node_register.second;
+            if (node_type == 0) {
+                Camera* camera = cameras[lookup_index];
+                scene->register_camera(camera);
+            }
+            if (node_type == 1) {
+                Object* obj = objects[lookup_index];
+                scene->register_object(obj);
+            }
+        }
+
+        scene->camera = scene->cameras[0];
+        return SM;
     }
 
 };
@@ -3929,6 +5020,7 @@ SceneManager* load_cornell_box() {
     Scene* scene = new Scene();
     Lens* lens = new RectLens(1, 1);
     Camera* camera = new Camera(XYZ(0, 0, -800*scalar), lens, XYZ(0, 0, -1));
+    scene->register_camera(camera);
 
     decimal box_width = 555*scalar;
     decimal wall_offset = box_width / 2;
@@ -3992,22 +5084,26 @@ SceneManager* load_cornell_box() {
     bust->addMesh(bust_mesh);
     bust->applyTransformXYZ(box_width * XYZ(-0.2, -0.2, -0.1));
 
-    scene->register_plane(wall_right);
-    scene->register_plane(wall_left);
-    scene->register_plane(back_wall);
-    scene->register_plane(top_wall);
-    scene->register_plane(bottom_wall);
-    scene->register_object(light_square);
-    scene->register_object(box_1);
-    scene->register_object(bust);
+    Object* room = new Object(XYZ(0, 0, 0), 1);
+    
+    room->addPlane(wall_right);
+    room->addPlane(wall_left);
+    room->addPlane(back_wall);
+    room->addPlane(top_wall);
+    room->addPlane(bottom_wall);
+    room->addChild(light_square);
+    room->addChild(box_1);
+    room->addChild(bust);
+
+    scene->register_object(room);
     //scene->register_object(box_2);
 
 
-    SceneManager* SM = new SceneManager(camera, scene);
+    SceneManager* SM = new SceneManager(scene);
 
     return SM;
 }
-
+/*
 SceneManager* load_default_scene() {
 
     Scene* scene = new Scene();
@@ -4077,18 +5173,18 @@ SceneManager* load_default_scene() {
     //m_obj->rotateY(PI / 4);
     m_obj->rotateZ(0);
 
-    scene->register_sphere(my_sphere);
-    scene->register_sphere(my_sphere_2);
-    scene->register_tri(my_tri);
-    scene->register_sphere(glow_sphere);
-    scene->register_plane(floor);
+    //scene->register_sphere(my_sphere);
+    //scene->register_sphere(my_sphere_2);
+    //scene->register_tri(my_tri);
+    //scene->register_sphere(glow_sphere);
+    //scene->register_plane(floor);
     scene->register_object(m_obj);
 
     SceneManager* SM = new SceneManager(camera, scene);
 
     return SM;
 }
-
+*/
 void benchmark() {
     XYZ direction = XYZ(1, 1, 0);
     direction.normalize();
@@ -4221,9 +5317,23 @@ void post_bench() {
 }
 
 void test_functions() {
-    int points = 100;
-    for (int i = 0; i < points; i++) {
-
+    int test_points = 1000;
+    int per_point = 10000;
+    for (int i = 0; i < test_points; i++) {
+        cout << VecLib::biased_random_hemi().to_string() << ",";
+    }
+    for (int i = 0; i < test_points; i++) {
+        XYZ pointing = XYZ::normalize(XYZ::random());
+        Quat rot = Quat::makeRotation(XYZ(0, 1, 0), pointing);
+        Matrix3x3 rot_m = Matrix3x3::quatToMatrix(rot);
+        XYZ average = XYZ();
+        for (int k = 0; k < per_point; k++) {
+            XYZ genned = VecLib::biased_random_hemi();
+            XYZ final_point = Matrix3x3::applyRotationMatrix(genned, rot_m);
+            average += final_point;
+        }
+        cout << pointing.to_string() << " vs " << XYZ::normalize((average / per_point)).to_string() << endl;
+        
     }
 }
 int main()
@@ -4237,13 +5347,16 @@ int main()
 
     VecLib::prep();
     
+    //test_functions();
     //benchmark();
-
+    cout << ImageHandler::config->getDescription() << endl;
+    cout << ImageHandler::config->getName() << endl; 
     //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
     
     //GUI->hold_window();
+    //SceneManager* scene_manager = load_cornell_box();
     SceneManager* scene_manager = FileManager::loadGLTFFile("C:\\Users\\Charlie\\Documents\\models\\Scenes\\cornell.glb");
-    scene_manager->render(640/2, 640/2, 5);
+    scene_manager->render(640/1, 640/1, 9);
     
     cout << endl << "writing out raw......." << flush;
     FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
