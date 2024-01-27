@@ -37,6 +37,17 @@ namespace OCIO = OCIO_NAMESPACE;
 #include <cassert>
 #include <immintrin.h>
 
+#define __SIMD_BITONIC_IMPLEMENTATION__
+#include "simd_bitonic.h"
+
+#include <boost/array.hpp>
+#include <boost/asio.hpp>
+
+import XYZ;
+import XorRandom;
+import VecLib;
+import Matrix;
+import Materials;
 
 #define assertm(exp, msg) assert(((void)msg, exp))
 #define SMALL 0.001
@@ -69,9 +80,9 @@ namespace OCIO = OCIO_NAMESPACE;
 
 #define USE_AVX_BVH 1
 #define USE_AVX_TRI 1
+#define ENABLE_MIS  0
 
-
-#if USE_AVX_TRI
+#if USE_AVX_TRI 1
 #define LEAF_SIZE 8
 #define PENALIZE_UNFILLED_LEAFS 1
 #else
@@ -79,98 +90,19 @@ namespace OCIO = OCIO_NAMESPACE;
 #define PENALIZE_UNFILLED_LEAFS 0
 #endif
 
+
 using namespace std;
+using boost::asio::ip::tcp;
 using time_point = chrono::steady_clock::time_point;
 
-/*Xorshiro256+ pseudorandom start. Not my code: https://prng.di.unimi.it/*/
 
-static inline uint64_t rotl(const uint64_t x, int k) {
-    return (x << k) | (x >> (64 - k));
-}
+static thread_local const __m256 AVX_ZEROS = _mm256_set1_ps(0);
+
+static thread_local XorGen gen;
 
 
-static thread_local uint64_t xe_seed[4];
-
-uint64_t xe_next(void) {
-    const uint64_t result = xe_seed[0] + xe_seed[3];
-
-    const uint64_t t = xe_seed[1] << 17;
-
-    xe_seed[2] ^= xe_seed[0];
-    xe_seed[3] ^= xe_seed[1];
-    xe_seed[1] ^= xe_seed[2];
-    xe_seed[0] ^= xe_seed[3];
-
-    xe_seed[2] ^= t;
-
-    xe_seed[3] = rotl(xe_seed[3], 45);
-
-    return result;
-}
-
-void xe_jump(void) {
-    static const uint64_t JUMP[] = { 0x180ec6d33cfd0aba, 0xd5a61266f0c9392c, 0xa9582618e03fc9aa, 0x39abdc4529b1661c };
-
-    uint64_t s0 = 0;
-    uint64_t s1 = 0;
-    uint64_t s2 = 0;
-    uint64_t s3 = 0;
-    for (int i = 0; i < sizeof JUMP / sizeof * JUMP; i++)
-        for (int b = 0; b < 64; b++) {
-            if (JUMP[i] & UINT64_C(1) << b) {
-                s0 ^= xe_seed[0];
-                s1 ^= xe_seed[1];
-                s2 ^= xe_seed[2];
-                s3 ^= xe_seed[3];
-            }
-            xe_next();
-        }
-
-    xe_seed[0] = s0;
-    xe_seed[1] = s1;
-    xe_seed[2] = s2;
-    xe_seed[3] = s3;
-}
-
-void xe_long_jump(void) {
-    static const uint64_t LONG_JUMP[] = { 0x76e15d3efefdcbbf, 0xc5004e441c522fb3, 0x77710069854ee241, 0x39109bb02acbe635 };
-
-    uint64_t s0 = 0;
-    uint64_t s1 = 0;
-    uint64_t s2 = 0;
-    uint64_t s3 = 0;
-    for (int i = 0; i < sizeof LONG_JUMP / sizeof * LONG_JUMP; i++)
-        for (int b = 0; b < 64; b++) {
-            if (LONG_JUMP[i] & UINT64_C(1) << b) {
-                s0 ^= xe_seed[0];
-                s1 ^= xe_seed[1];
-                s2 ^= xe_seed[2];
-                s3 ^= xe_seed[3];
-            }
-            xe_next();
-        }
-
-    xe_seed[0] = s0;
-    xe_seed[1] = s1;
-    xe_seed[2] = s2;
-    xe_seed[3] = s3;
-}
 /*Xorshiro256+ pseudorandom end*/
 
-decimal xe_frand() {
-    return (xe_next() >> 11) * 0x1.0p-53;
-}
-
-decimal rand_frand() //https://stackoverflow.com/a/2704552
-{
-    return (decimal)rand() / RAND_MAX;
-}
-
-decimal fRand(decimal fMin, decimal fMax) //https://stackoverflow.com/a/2704552
-{
-    decimal f = xe_frand();
-    return fMin + f * (fMax - fMin);
-}
 
 decimal clamp(decimal value, decimal low, decimal high) {
     return max(min(value, high), low);
@@ -253,1230 +185,11 @@ vector<string> split_string(string input, char splitter) {
     return output;
 }
 
-struct iXY {
-    int X;
-    int Y;
-    iXY() :X(0), Y(0) {}
-    iXY(int _x, int _y) : X(_x), Y(_y) {}
-    iXY operator+(const iXY& other) const {
-        return iXY(X + other.X, Y + other.Y);
-    }
-    iXY operator-(const iXY& other) const {
-        return iXY(X - other.X, Y - other.Y);
-    }
-    bool operator==(const iXY& other) const
-    {
-        if (X == other.X && Y == other.Y) return true;
-        else return false;
-    }
 
-    struct HashFunction
-    {
-        size_t operator()(const iXY& coord) const
-        {
-            size_t xHash = std::hash<int>()(coord.X);
-            size_t yHash = std::hash<int>()(coord.Y) << 1;
-            return xHash ^ yHash;
-        }
-    };
-    typedef unordered_set<iXY, iXY::HashFunction> set;
-};
-
-struct XY {
-    decimal X;
-    decimal Y;
-    XY() :X(0), Y(0) {}
-    XY(decimal _x, decimal _y) : X(_x), Y(_y) {}
-    XY operator+(const XY& other) const {
-        return XY(X + other.X, Y + other.Y);
-    }
-    XY operator-(const XY& other) const {
-        return XY(X - other.X, Y - other.Y);
-    }
-    XY operator*(const decimal& scalar) const {
-        return XY(X * scalar, Y * scalar);
-    }
-    bool operator==(const XY& other) const
-    {
-        if (X == other.X && Y == other.Y) return true;
-        else return false;
-    }
-
-    struct HashFunction
-    {
-        size_t operator()(const XY& coord) const
-        {
-            size_t xHash = std::hash<int>()(coord.X);
-            size_t yHash = std::hash<int>()(coord.Y) << 1;
-            return xHash ^ yHash;
-        }
-    };
-    typedef unordered_set<XY, XY::HashFunction> set;
-};
-XY operator*(const decimal& self, const XY& coord) {
-    return coord * self;
-}
-
-template <typename T> T sign(T& input) {
-    return (T) ((input < 0) ? -1 : 1);
-}
-
-struct XYZ {
-public:
-    decimal X;
-    decimal Y;
-    decimal Z;
-    XYZ() : X(0), Y(0), Z(0) {}
-    XYZ(decimal s) : X(s), Y(s), Z(s) {}
-    XYZ(decimal _X, decimal _Y, decimal _Z) : X(_X), Y(_Y), Z(_Z) {}
-    XYZ(vector<double> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
-    XYZ(vector<float> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
-    XYZ(vector<double> attr, vector<char> swizzle) : X(attr[sign(swizzle[0])*abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
-    XYZ(vector<float> attr, vector<char> swizzle) : X(attr[sign(swizzle[0]) * abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
-    XYZ(XY xy, decimal _Z) : X(xy.X), Y(xy.Y), Z(_Z) {}
-    XYZ(XY xy) : XYZ(xy, 0) {}
-    XYZ(sf::Color c) : XYZ(c.r, c.g, c.b) {}
-    XYZ clone() {
-        return XYZ(X, Y, Z);
-    }
-    decimal operator[](const int n) const {
-        if (n == 0) return X;
-        if (n == 1) return Y;
-        if (n == 2) return Z;
-    }
-    decimal& operator[](const int n) {
-        if (n == 0) return X;
-        if (n == 1) return Y;
-        if (n == 2) return Z;
-    }
-    XYZ swizzle(vector<char> swiz) {
-        return XYZ(
-            sign(swiz[0]) * (*this)[abs(swiz[0])],
-            sign(swiz[1]) * (*this)[abs(swiz[1])],
-            sign(swiz[2]) * (*this)[abs(swiz[2])]
-        );
-    }
-    void add(decimal addend) {
-        X += addend;
-        Y += addend;
-        Z += addend;
-    }
-    void add(const XYZ& other) {
-        X += other.X;
-        Y += other.Y;
-        Z += other.Z;
-    }
-    void divide(decimal divisor) {
-        X /= divisor;
-        Y /= divisor;
-        Z /= divisor;
-    }
-    void clip_negative(decimal clip_to = 0) {
-        X = (X < 0) ? clip_to : X;
-        Y = (Y < 0) ? clip_to : Y;
-        Z = (Z < 0) ? clip_to : Z;
-    }
-    decimal smallest() {
-        if (X < Y) {
-            if (X < Z) {
-                return X;
-            }
-            else {
-                return Z;
-            }
-        }
-        else {
-            if (Y < Z) {
-                return Y;
-            }
-            else {
-                return Z;
-            }
-        }
-    }
-    void make_safe() { //ensures point can always be used for division
-        X = (X == 0) ? (decimal)0.000001 : X;
-        Y = (Y == 0) ? (decimal)0.000001 : Y;
-        Z = (Z == 0) ? (decimal)0.000001 : Z;
-    }
-    decimal magnitude() {
-        return sqrt(X * X + Y * Y + Z * Z); // 
-    }
-    decimal magnitude_noRT() {
-        return X * X + Y * Y + Z * Z; // 
-    }
-    void normalize() {
-        decimal len = magnitude();
-        divide(len);
-    }
-    static decimal magnitude(const XYZ& v) {
-        return sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
-    }
-    static XYZ reflect(XYZ vector, XYZ pole) {
-        decimal vector_magnitude = vector.magnitude();
-        decimal pole_magnitude = pole.magnitude();
-        decimal mag_ratio = vector_magnitude / pole_magnitude;
-        XYZ reflection_point = pole * (XYZ::cosine(vector, pole) * mag_ratio);
-        XYZ pointing = reflection_point - vector;
-        //decimal component = 2*XYZ::cosine(vector, pole)-1; //Weird math shit.
-        return vector + (pointing * 2);
-    }
-    static XYZ floor(XYZ point) {
-        return XYZ(
-            std::floor(point.X),
-            std::floor(point.Y),
-            std::floor(point.Z)
-        );
-    }
-    static decimal maxComponent(const XYZ& point) {
-        return std::max(point.X, std::max(point.Y, point.Z));
-    }
-    static decimal minComponent(const XYZ& point) {
-        return std::min(point.X, std::min(point.Y, point.Z));
-    }
-    static XYZ min(const XYZ& point, decimal value) {
-        return XYZ(
-            (point.X < value) ? point.X : value,
-            (point.Y < value) ? point.Y : value,
-            (point.Z < value) ? point.Z : value
-        );
-
-    }
-    static XYZ min(decimal value, XYZ point) {
-        return XYZ::min(point, value);
-    }
-    static XYZ min(const XYZ& point, const XYZ& other) {
-        return XYZ(
-            (point.X < other.X) ? point.X : other.X,
-            (point.Y < other.Y) ? point.Y : other.Y,
-            (point.Z < other.Z) ? point.Z : other.Z
-        );
-    }
-    static XYZ max(const XYZ& point, const XYZ& other) {
-        return XYZ(
-            (point.X > other.X) ? point.X : other.X,
-            (point.Y > other.Y) ? point.Y : other.Y,
-            (point.Z > other.Z) ? point.Z : other.Z
-        );
-    }
-    static XYZ max(const XYZ& point,const decimal& value) {
-        return XYZ(
-            (point.X > value) ? point.X : value,
-            (point.Y > value) ? point.Y : value,
-            (point.Z > value) ? point.Z : value
-        );
-
-    }
-    static decimal length(const XYZ& vector) {
-        return sqrt(vector.X * vector.X + vector.Y * vector.Y + vector.Z * vector.Z);
-    }
-
-    static XYZ normalize(const XYZ& vector) {
-        decimal len = XYZ::length(vector);
-        return XYZ(vector.X / len, vector.Y / len, vector.Z / len);
-    }
-    static XYZ divide(const XYZ& point, const XYZ& other) {
-        return XYZ(point.X / other.X, point.Y / other.Y, point.Z / other.Z);
-    }
-    static XYZ divide(const XYZ& point, decimal divisor) {
-        return XYZ(point.X / divisor, point.Y / divisor, point.Z / divisor);
-    }
-    static XYZ add(const XYZ& point, decimal addend) {
-        return XYZ(point.X + addend, point.Y + addend, point.Z + addend);
-    }
-    static XYZ add(const XYZ& point, const XYZ& other) {
-        return XYZ(point.X + other.X, point.Y + other.Y, point.Z + other.Z);
-    }
-    static decimal distance_noRt(XYZ& point, XYZ& other) {
-        decimal f1 = point.X - other.X;
-        decimal f2 = point.Y - other.Y;
-        decimal f3 = point.Z - other.Z;
-        return f1 * f1 + f2 * f2 + f3 * f3;
-    }
-    static decimal distance(const XYZ& point,const XYZ& other){
-        decimal f1 = point.X - other.X;
-        decimal f2 = point.Y - other.Y;
-        decimal f3 = point.Z - other.Z;
-        return sqrt(f1 * f1 + f2 * f2 + f3 * f3);
-    }
-    static XYZ _rtslope(const XYZ& point, const XYZ& other) {
-        decimal distance = XYZ::distance(point, other);
-        return (other - point) / distance;
-    }
-    static XYZ _dotslope(const XYZ& point, const XYZ& other) {
-        XYZ delta = other - point;
-        return delta / XYZ::dot(delta, delta);
-    }
-    static XYZ slope(const XYZ& point, const XYZ& other) {
-        return _rtslope(point, other);
-    }
-    static XYZ flip(XYZ point) {
-        return XYZ(-point.X, -point.Y, -point.Z);
-    }
-    static decimal dot(XYZ point, XYZ other) {
-        return point.X * other.X + point.Y * other.Y + point.Z * other.Z;
-    }
-    static decimal cosine(XYZ point, XYZ other) {
-        decimal result = XYZ::dot(point, other) / (point.magnitude() * other.magnitude());
-        return result;
-    }
-    static XYZ pow(XYZ point, decimal power) {
-        return XYZ(std::pow(point.X, power), std::pow(point.Y, power), std::pow(point.Z, power));
-    }
-    static XYZ cross(XYZ point, XYZ other) {
-        return XYZ(
-            point.Y * other.Z - point.Z * other.Y,
-            point.Z * other.X - point.X * other.Z,
-            point.X * other.Y - point.Y * other.X
-        );
-    }
-    static XYZ log(XYZ point) {
-        return XYZ(
-            log10(point.X),
-            log10(point.Y),
-            log10(point.Z)
-        );
-    }   
-    static XYZ clamp(XYZ value, XYZ low, XYZ high) {
-        return XYZ(
-            std::min(std::max(value.X, low.X), high.X),
-            std::min(std::max(value.Y, low.Y), high.Y),
-            std::min(std::max(value.Z, low.Z), high.Z)
-        );
-    }
-    static XYZ clamp(XYZ value, decimal low, decimal high) {
-        return clamp(value, XYZ(low, low, low), XYZ(high, high, high));
-    }
-    static XYZ negative(const XYZ& v) {
-        return XYZ(-v.X, -v.Y, -v.Z);
-    }
-    static XYZ random(decimal nRx, decimal Rx, decimal nRy, decimal Ry, decimal nRz, decimal Rz) {
-        return XYZ(
-            fRand(nRx, Rx),
-            fRand(nRy, Ry),
-            fRand(nRz, Rz)
-        );
-    }
-    static XYZ random(decimal Rx, decimal Ry, decimal Rz) {
-        return random(
-            -Rx, Rx, -Ry, Ry, -Rz, Rz
-        );
-    }
-    static XYZ random(decimal range = 1) {
-        return random(range, range, range);
-    }
-    string to_string() {
-        return "("+std::to_string(X) + ", " + std::to_string(Y) + ", " + std::to_string(Z)+")";
-    }
-    XYZ operator/(const XYZ& other) const {
-        return XYZ(X / other.X, Y / other.Y, Z / other.Z);
-    }
-    XYZ operator/(const decimal divisor) const {
-        return XYZ(X / divisor, Y / divisor, Z / divisor);
-    }
-    XYZ operator+(const XYZ& other) const {
-        return XYZ(X + other.X, Y + other.Y, Z + other.Z);
-    }
-    XYZ operator+(const decimal addend) const {
-        return XYZ(X + addend, Y + addend, Z + addend);
-    }
-    XYZ operator-(const XYZ& other) const {
-        return XYZ(X - other.X, Y - other.Y, Z - other.Z);
-    }
-    XYZ operator-(const decimal addend) const {
-        return XYZ(X - addend, Y - addend, Z - addend);
-    }
-    XYZ operator*(const decimal multiplier) const {
-        return XYZ(X * multiplier, Y * multiplier, Z * multiplier);
-    }
-    XYZ operator*(const XYZ& other) const {
-        return XYZ(X * other.X, Y * other.Y, Z * other.Z);
-    }
-    XYZ operator+=(const XYZ& other) {
-        X += other.X;
-        Y += other.Y;
-        Z += other.Z;
-        return *this;
-    }
-    XYZ operator *= (const XYZ & other) {
-        X *= other.X;
-        Y *= other.Y;
-        Z *= other.Z;
-        return *this;
-    }
-    XYZ operator *= (const decimal& scalar) {
-        X *= scalar;
-        Y *= scalar;
-        Z *= scalar;
-        return *this;
-    }
-    XYZ operator-() {
-        return XYZ(-X, -Y, -Z);
-    }
-    bool operator !=(const XYZ& other){
-        return !((X == other.X) && (Y == other.Y) && (Z == other.Z));
-    }
-    bool operator !=(XYZ& other){
-        return !((X == other.X) && (Y == other.Y) && (Z == other.Z));
-    }
-    static bool equals(const XYZ& point, const XYZ& other) {
-        return (point.X == other.X) && (point.Y == other.Y) && (point.Z == other.Z);
-    }
-    bool operator ==(const XYZ& other) {
-        return (X == other.X) && (Y == other.Y) && (Z == other.Z);
-    }
-    static XYZ linear_mix(decimal c, const XYZ& first, const XYZ& second) {
-        decimal i = 1 - c;
-        return XYZ(first.X * i + second.X * c, first.Y * i + second.Y * c, first.Z * i + second.Z * c);
-    }
-    struct less_than_x_operator {
-        inline bool operator() (const XYZ& point1, const XYZ& point2)
-        {
-            return (point1.X < point2.X);
-        }
-    };
-    struct less_than_y_operator {
-        inline bool operator() (const XYZ& point1, const XYZ& point2)
-        {
-            return (point1.Y < point2.Y);
-        }
-    };
-    struct less_than_z_operator {
-        inline bool operator() (const XYZ& point1, const XYZ& point2)
-        {
-            return (point1.Z < point2.Z);
-        }
-    };
-    struct less_than_x_operator_p {
-        inline bool operator() (const XYZ* point1, const XYZ* point2)
-        {
-            return (point1->X < point2->X);
-        }
-    };
-    struct less_than_y_operator_p {
-        inline bool operator() (const XYZ* point1, const XYZ* point2)
-        {
-            return (point1->Y < point2->Y);
-        }
-    };
-    struct less_than_z_operator_p {
-        inline bool operator() (const XYZ* point1, const XYZ* point2)
-        {
-            return (point1->Z < point2->Z);
-        }
-    };
-};
-XYZ operator*(const decimal& self, const XYZ& point){
-    return point * self;
-}
-XYZ operator-(const decimal& self, const XYZ& point) {
-    return point + self;
-}
-XYZ operator/(const decimal& self, const XYZ& point) {
-    return XYZ::divide(self,point);
-}
-
-std::ostream& operator<<(std::ostream& os, XYZ& m) {
-    return os << m.to_string();
-}
-
-struct Quat : public XYZ {
-    decimal W;
-    Quat() : XYZ(), W(0) {}
-    Quat(XYZ _XYZ, decimal _W) : XYZ(_XYZ), W(_W) {}
-    Quat(decimal _X, decimal _Y, decimal _Z) : XYZ(_X,_Y,_Z), W(0) {}
-    Quat(decimal _X, decimal _Y, decimal _Z,decimal _W) : XYZ(_X, _Y, _Z), W(_W) {}
-    Quat(vector<float> attr) : XYZ(attr), W(attr[3]) {}
-    Quat(vector<double> attr) : XYZ(attr), W(attr[3]) {}
-    Quat(vector<float> attr, vector<char> swizzle) : XYZ(attr,swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
-    Quat(vector<double> attr, vector<char> swizzle) : XYZ(attr,swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
-    Quat clone() {
-        return Quat(X, Y, Z, W);
-    }
-    decimal magnitude() {
-        return Quat::dot(*this, *this);//inefficient but whatever
-    }
-    static decimal dot(const Quat& q1, const Quat& q2) {
-        return q1.X * q2.X + q1.Y * q2.Y + q1.Z * q2.Z + q1.W * q2.W;
-    }
-    static Quat multiply(const Quat& q1, const Quat& q2) {
-        return Quat(
-            q1.W * q2.X + q1.X * q2.W + q1.Y * q2.Z - q1.Z * q2.Y,
-            q1.W * q2.Y - q1.X * q2.Z + q1.Y * q2.W + q1.Z * q2.X,
-            q1.W * q2.Z + q1.X * q2.Y - q1.Y * q2.X + q1.Z * q2.W,
-            q1.W * q2.W - q1.X * q2.X - q1.Y * q2.Y - q1.Z * q2.Z
-        );
-    }
-    static Quat normalize(const Quat& in) {
-        decimal d = Quat::dot(in, in);
-        decimal l = sqrt(d);
-        return in / l;
-    }
-    static Quat makeRotation_(const XYZ& start, const XYZ& end) {
-        XYZ a = XYZ::cross(start, end);
-        decimal theta = acos(XYZ::dot(start, end));
-
-    }
-    static Quat makeRotation(const XYZ& up, const XYZ& direction) {
-        if (XYZ::equals(direction, up)) {
-            return Quat(0, 0, 0, 1);
-        }
-        XYZ a = XYZ::cross(up, direction);
-        if (XYZ::equals(direction, XYZ::negative(up))) {
-            return Quat(a, 0);
-        }
-        
-        decimal m1 = XYZ::magnitude(up);
-        decimal m2 = XYZ::magnitude(direction);
-
-        Quat out = Quat(
-            a,
-            sqrt(m1 * m1 * m2 * m2) + XYZ::dot(up, direction)
-        );
-
-        return Quat::normalize(out);
-    }
-    static Quat makeRotationFromY(const XYZ& direction) {
-        if (XYZ::equals(direction, XYZ(0, 1, 0))) {
-            return Quat(0, 0, 0, 1);
-        } 
-        if (XYZ::equals(direction, XYZ(0, -1, 0))) {
-            return Quat(0, 0, 1, 0);
-        }
-        decimal m1 = 1;
-        decimal m2 = XYZ::magnitude(direction);
-        Quat out = Quat(
-            XYZ(
-                direction.Z,
-                0,
-                -direction.X
-            ),
-            m2 + direction.Y
-        );
-        return Quat::normalize(out);
-
-    }
-    static XYZ applyRotation(const XYZ& p, const Quat& r) { //https://blog.molecular-matters.com/2013/05/24/a-faster-quaternion-vector-multiplication/
-        //I dont understand ANY of this, but by god apparently its fast
-        XYZ t = 2 * XYZ::cross(r, p);
-        return p + r.W * t + cross(r, t);
-    }
-    Quat operator/(decimal div) const {
-        return Quat(
-            X / div,
-            Y / div,
-            Z / div,
-            W / div
-        );
-    }
-};
-
-struct m256_vec3 {
-    __m256 X;
-    __m256 Y;
-    __m256 Z;
-    m256_vec3() {};
-    m256_vec3(XYZ fill) {
-        X = _mm256_set1_ps(fill.X);
-        Y = _mm256_set1_ps(fill.Y);
-        Z = _mm256_set1_ps(fill.Z);
-    }
-    m256_vec3(vector<XYZ> input) {
-        vector<float> x_vec;
-        vector<float> y_vec;
-        vector<float> z_vec;
-        for (int i = 0; i < 8 && i < input.size(); i++) {
-            x_vec.push_back(input[i].X);
-            y_vec.push_back(input[i].Y);
-            z_vec.push_back(input[i].Z);
-        }
-        while (x_vec.size() < 8) {
-            x_vec.push_back(0);
-            y_vec.push_back(0);
-            z_vec.push_back(0);
-        }
-        X = _mm256_load_ps(x_vec.data());
-        Y = _mm256_load_ps(y_vec.data());;
-        Z = _mm256_load_ps(z_vec.data());;
-    }
-    XYZ at(int i) const {
-        double x = ((float*)&X)[i];
-        double y = ((float*)&Y)[i];
-        double z = ((float*)&Z)[i];
-        return XYZ(x, y, z);
-    }
-    static void sub(const m256_vec3& v1, const m256_vec3& v2, m256_vec3& output) {
-        output.X = _mm256_sub_ps(v1.X, v2.X);
-        output.Y = _mm256_sub_ps(v1.Y, v2.Y);
-        output.Z = _mm256_sub_ps(v1.Z, v2.Z);
-    }
-    static m256_vec3 sub_inline(const m256_vec3& v1, const m256_vec3& v2) {
-        m256_vec3 output;
-        sub(v1, v2, output);
-        return output;
-    }
-};
-
-struct m256_vec2 {
-    __m256 X;
-    __m256 Y;
-    m256_vec2() {};
-    m256_vec2(XY fill) {
-        X = _mm256_set1_ps(fill.X);
-        Y = _mm256_set1_ps(fill.Y);
-    }
-    m256_vec2(vector<XY> input) {
-        vector<float> x_vec;
-        vector<float> y_vec;
-        for (int i = 0; i < 8 && i < input.size(); i++) {
-            x_vec.push_back(input[i].X);
-            y_vec.push_back(input[i].Y);
-        }
-        while (x_vec.size() < 8) {
-            x_vec.push_back(0);
-            y_vec.push_back(0);
-        }
-        X = _mm256_load_ps(x_vec.data());
-        Y = _mm256_load_ps(y_vec.data());;
-    }
-    XY at(int i) const {
-        double x = ((float*)&X)[i];
-        double y = ((float*)&Y)[i];
-        return XY(x, y);
-    }
-};
-
-
-decimal Ssin(decimal theta) {
-    return theta - (theta * theta * theta) / 6 + (theta * theta * theta * theta * theta) / 120;
-}
-
-decimal Scos(decimal theta) {
-    return 1 - (theta * theta) / 2 + (theta * theta * theta * theta) / 24;
-}
-
-#define LOOKUP_SIZE_TRIG 1024
-#define LOOKUP_TRIG_MASK LOOKUP_SIZE_TRIG-1
-#define LOOKUP_SIZE_BIASED_HEMI 1024*32
-#define LOOKUP_BIASED_HEMI_MASK LOOKUP_SIZE_BIASED_HEMI-1
-
-decimal arccos_lookup[LOOKUP_SIZE_TRIG];
-decimal sin_lookup[LOOKUP_SIZE_TRIG];
-decimal cos_lookup[LOOKUP_SIZE_TRIG];
-XYZ biased_hemi_lookup[LOOKUP_SIZE_BIASED_HEMI];
-
-namespace VecLib {
-    __m256 sgn_fast(__m256& x) //credit to Peter Cordes https://stackoverflow.com/a/41353450
-    {
-        __m256 negzero = _mm256_set1_ps(-0.0f);
-
-        // using _mm_setzero_ps() here might actually be better without AVX, since xor-zeroing is as cheap as a copy but starts a new dependency chain
-        //__m128 nonzero = _mm_cmpneq_ps(x, negzero);  // -0.0 == 0.0 in IEEE floating point
-
-        __m256 x_signbit = _mm256_and_ps(x, negzero);
-        return _mm256_or_ps(_mm256_set1_ps(1.0f), x_signbit);
-    }
-    void cross_avx(const m256_vec3& v1,const m256_vec3& v2, m256_vec3& output) {
-        __m256 c1 = _mm256_mul_ps(v1.Z, v2.Y);
-        __m256 c2 = _mm256_mul_ps(v1.X, v2.Z);
-        __m256 c3 = _mm256_mul_ps(v1.Y, v2.X);
-        output.X = _mm256_fmsub_ps(v1.Y, v2.Z, c1);
-        output.Y = _mm256_fmsub_ps(v1.Z, v2.X, c2);
-        output.Z = _mm256_fmsub_ps(v1.X, v2.Y, c3);
-    }
-    void dot_avx(const m256_vec3& v1, const m256_vec3& v2, __m256& output) {
-        output = _mm256_fmadd_ps(
-            v1.Z,
-            v2.Z,
-            _mm256_fmadd_ps(
-                v1.Y,
-                v2.Y,
-                _mm256_mul_ps(
-                    v1.X,
-                    v2.X
-                )
-            )
-        );
-    }
-    __m256 inline_dot_avx(const m256_vec3& v1, const m256_vec3& v2) {
-        __m256 output;
-        dot_avx(v1, v2, output);
-        return output;
-    }
-    void dot_mul_avx(const m256_vec3& v1, const m256_vec3& v2, const __m256& v3, __m256& output) {
-        output = _mm256_mul_ps(
-            v3,
-            _mm256_fmadd_ps(
-                v1.Z,
-                v2.Z,
-                _mm256_fmadd_ps(
-                    v1.Y,
-                    v2.Y,
-                    _mm256_mul_ps(
-                        v1.X,
-                        v2.X
-                    )
-                )
-            )
-        );
-    }
-    double poly_acos(decimal x) {
-        return (-0.69813170079773212 * x * x - 0.87266462599716477) * x + 1.5707963267948966;
-    }
-    static decimal Lsin(decimal input) {
-        if (input < 0) input = PI - input;
-        int index = ((int)(input * (LOOKUP_SIZE_TRIG/(PI*2)) )) & LOOKUP_TRIG_MASK;
-        return sin_lookup[index];
-    }
-    static decimal Lcos(decimal input) {
-        if (input < 0) input = 2 * PI - input;
-        int index = ((int)(input * (LOOKUP_SIZE_TRIG / (PI * 2)))) & LOOKUP_TRIG_MASK;
-        return cos_lookup[index];
-    }
-    static decimal Lacos(decimal input) {
-        int index = ((int)((input+1)/2.0 * LOOKUP_SIZE_TRIG)) & LOOKUP_TRIG_MASK;
-        return arccos_lookup[index];
-    }
-    static XYZ gen_random_point_on_sphere() {
-        double r1 = fRand(0, 1);
-        double r2 = fRand(0, 1);
-        double f1 = Lacos(2*r1-1) - PI / 2;
-        double f2 = r2 * 2 * PI;
-        return XYZ(Lcos(f1)*Lcos(f2), Lsin(f1), Lcos(f1) * Lsin(f2));
-    }
-    //r1 is the vertical component, r2 is the rotational component
-    static XYZ generate_biased_random_hemi_v2(float r1_min = 0, float r1_max = 1, float r2_min = 0, float r2_max = 1) {//https://www.rorydriscoll.com/2009/01/07/better-sampling/
-        const float r1 = fRand(r1_min, r1_max);
-        const float r2 = fRand(r2_min, r2_max);
-        const float r = sqrt(r1);
-        const float theta = 2 * PI * r2;
-
-        const float x = r * Lcos(theta);
-        const float y = r * Lsin(theta);
-
-        return XYZ(x, sqrt(1 - r1), y);
-    }
-    static XYZ lookup_biased_random_hemi() {
-        int index = fRand(0,1) * LOOKUP_BIASED_HEMI_MASK;
-        return biased_hemi_lookup[index];
-    }
-    static XYZ generate_biased_random_hemi() {
-        XYZ pos = XYZ(0, 1, 0) + gen_random_point_on_sphere();
-        return XYZ::slope(XYZ(0), pos);
-    }
-    static void prep() {
-        for (int i = 0; i < LOOKUP_SIZE_TRIG; i++) {
-            double pi2_scalar = ((double) LOOKUP_SIZE_TRIG) / 2.0 / PI;
-            double scalar2 = (double)LOOKUP_SIZE_TRIG / 2;
-            sin_lookup[i] = sin((double)i / pi2_scalar);
-            cos_lookup[i] = cos((double)i / pi2_scalar);
-            arccos_lookup[i] = acos((double)i / scalar2 - 1);
-        }
-        for (int i = 0; i < LOOKUP_SIZE_BIASED_HEMI; i++) {
-            biased_hemi_lookup[i] = generate_biased_random_hemi();
-        }
-    }
-    static XYZ generate_unbiased_random_hemi() {
-        XYZ pos = gen_random_point_on_sphere();
-        if (pos.Y < 0) pos.Y *= -1;
-        return XYZ::slope(0, pos);
-    }
-    static XYZ biased_random_hemi(float r1_min = 0, float r1_max = 1, float r2_min = 0, float r2_max = 1) {
-        return generate_biased_random_hemi_v2(r1_min, r1_max, r2_min, r2_max);
-    }
-    static XYZ unbiased_random_hemi() {
-        return generate_unbiased_random_hemi();
-    }
-    static XYZ lookup_random_cone(decimal spread) {
-        decimal y_f = fRand(0, spread);
-        decimal z_f = fRand(0, 2 * PI);
-        return XYZ(Lsin(y_f) * Lcos(z_f), Lcos(y_f), Lsin(y_f) * Lsin(z_f));
-    }
-    static XYZ y_random_cone(decimal spread) {
-        decimal y = fRand(1, spread);
-        decimal rot = fRand(0, PI);
-        decimal f_y = sqrt(1 - y * y);
-        return XYZ(f_y * cos(rot), y, f_y * sin(rot));
-    }
-    static XYZ aligned_random(decimal spread, const Quat& r) {
-        return Quat::applyRotation(lookup_random_cone(spread), r);
-    }
-    static decimal surface_area(const XYZ& max, const XYZ& min) {
-        decimal l_x = max.X - min.X;
-        decimal l_y = max.Y - min.Y;
-        decimal l_z = max.Z - min.Z;
-        return (l_x * l_y + l_x * l_z + l_y * l_z)*2;
-    }
-    static decimal volume(const XYZ& max, const XYZ& min) {
-        decimal l_x = max.X - min.X;
-        decimal l_y = max.Y - min.Y;
-        decimal l_z = max.Z - min.Z;
-        return (l_x * l_y * l_z);
-    }
-    static bool between(const XYZ& p1, const XYZ& p2, const XYZ test) {
-        return (
-            (p1.X < test.X && test.X < p1.X) &&
-            (p1.Y < test.Y && test.Y < p1.Y) &&
-            (p1.Z < test.Z && test.Z < p1.Z)
-            );
-    }
-    static bool betweenX(const XYZ& p1, const XYZ& p2, const XYZ test) {
-        return (
-            (p1.X < test.X && test.X < p1.X)
-            );
-    }
-    static bool betweenY(const XYZ& p1, const XYZ& p2, const XYZ test) {
-        return (
-            (p1.Y < test.Y && test.Y < p1.Y)
-            );
-    }
-    static bool betweenZ(const XYZ& p1, const XYZ& p2, const XYZ test) {
-        return (
-            (p1.Z < test.Z && test.Z < p1.Z)
-            );
-    }
-    static bool volumeClip(const XYZ& max_1, const XYZ& min_1, const XYZ& max_2, const XYZ& min_2) {
-        bool term1 = (max_1.X >= min_2.X && max_2.X >= min_1.X);
-        bool term2 = (max_1.Y >= min_2.Y && max_2.Y >= min_1.Y);
-        bool term3 = (max_1.Z >= min_2.Z && max_2.Z >= min_1.Z);
-        return term1 && term2 && term3;
-        /*bool term1 = (
-            (((max_2.X < max_1.X) && (max_2.X > min_1.X)) || ((min_2.X < max_1.X) && (min_2.X > min_1.X))) &&
-            (((max_2.Y < max_1.Y) && (max_2.Y > min_1.Y)) || ((min_2.Y < max_1.Y) && (min_2.Y > min_1.Y))) &&
-            (((max_2.Z < max_1.Z) && (max_2.Z > min_1.Z)) || ((min_2.Z < max_1.Z) && (min_2.Z > min_1.Z)))
-            );
-        return term1;*/
-    }
-    static bool volumeContains(const XYZ& max, const XYZ& min, const XYZ& point) {
-        bool t1 = (point.X<max.X && point.X>min.X);
-        bool t2 = (point.Y<max.Y && point.Y>min.Y);
-        bool t3 = (point.Z<max.Z && point.Z>min.Z);
-        return t1&&t2&&t3;
-    }
-}
-struct Matrix3x3 {
-public:
-    decimal data[9];
-    Matrix3x3() {
-        data[0] = 0;
-        data[1] = 0;
-        data[2] = 0;
-        data[3] = 0;
-        data[4] = 0;
-        data[5] = 0;
-        data[6] = 0;
-        data[7] = 0;
-        data[8] = 0;
-    }
-    Matrix3x3(decimal a, decimal b, decimal c, decimal d, decimal e, decimal f, decimal g, decimal h, decimal i) {
-        data[0] = a;
-        data[1] = b;
-        data[2] = c;
-        data[3] = d;
-        data[4] = e;
-        data[5] = f;
-        data[6] = g;
-        data[7] = h;
-        data[8] = i;
-    }
-    static Matrix3x3 quatToMatrix(Quat q) {
-        Matrix3x3 m;
-        decimal s = q.magnitude();
-        m.data[0] = 1 - 2 * s * (q.Y * q.Y + q.Z * q.Z);
-        m.data[1] = 2 * s * (q.X * q.Y - q.Z * q.W);
-        m.data[2] = 2 * s * (q.X * q.Z + q.Y * q.W);
-        m.data[3] = 2 * s * (q.X * q.Y + q.Z * q.W);
-        m.data[4] = 1 - 2 * s * (q.X * q.X + q.Z * q.Z);
-        m.data[5] = 2 * s * (q.Y * q.Z - q.X * q.W);
-        m.data[6] = 2 * s * (q.X * q.Z - q.Y * q.W);
-        m.data[7] = 2 * s * (q.Y * q.Z + q.X * q.W);
-        m.data[8] = 1 - 2 * s * (q.X * q.X + q.Y * q.Y);
-        return m;
-    }
-    static XYZ applyRotationMatrix(const XYZ& point, const Matrix3x3& m) {
-        return XYZ(
-            point.X * m.data[0] + point.Y * m.data[1] + point.Z * m.data[2],
-            point.X * m.data[3] + point.Y * m.data[4] + point.Z * m.data[5],
-            point.X * m.data[6] + point.Y * m.data[7] + point.Z * m.data[8]
-        );
-    }
-    //static Matrix3x3 createMatrix(const XYZ& start, const XYZ& end) {
-    //    XYZ v = XYZ::cross(start, end);
-    //    XYZ s = XYZ::magnitude(v);
-    //    double c = XYZ::dot(start, end);
-    //    Matrix3x3 v_b = Matrix3x3(
-    //        0   ,-v[2], v[1],
-    //        v[2],    0,-v[0],
-    //       -v[1], v[0],    0
-    //    );
-    //}
-    static XYZ aligned_random(decimal spread, const Matrix3x3& r) {
-        return applyRotationMatrix(VecLib::lookup_random_cone(spread),r);
-    }
-    static XYZ aligned_biased_hemi(const Matrix3x3& r, float r1_min = 0, float r1_max = 1, float r2_min = 0, float r2_max = 1) {
-        return applyRotationMatrix(VecLib::biased_random_hemi(r1_min, r1_max, r2_min, r2_max), r);
-    }
-    static XYZ aligned_unbiased_hemi(const Matrix3x3& r) {
-        return applyRotationMatrix(VecLib::unbiased_random_hemi(), r);
-    }
-    static XYZ multiply_vertically(const Matrix3x3& mat, const XYZ& other) {
-        return XYZ(
-            other.X * mat.data[0] + other.Y * mat.data[3] + other.Z * mat.data[6],
-            other.X * mat.data[1] + other.Y * mat.data[4] + other.Z * mat.data[7],
-            other.X * mat.data[2] + other.Y * mat.data[5] + other.Z * mat.data[8]
-        );
-    }
-    static XYZ multiply_horizontally(const Matrix3x3& mat, const XYZ& other) {
-        return XYZ(
-            other.X * mat.data[0] + other.Y * mat.data[1] + other.Z * mat.data[2],
-            other.X * mat.data[3] + other.Y * mat.data[4] + other.Z * mat.data[5],
-            other.X * mat.data[6] + other.Y * mat.data[7] + other.Z * mat.data[8]
-        );
-    }
-    static Matrix3x3 transpose(const Matrix3x3& m) {
-        return Matrix3x3(
-            m.data[0], m.data[3], m.data[6],
-            m.data[1], m.data[4], m.data[7],
-            m.data[2], m.data[5], m.data[8]
-        );
-    }
-};
 
 typedef tuple<XYZ, XYZ, XYZ> Face;
 typedef tuple<bool, bool, bool> tri_bool;
 
-class XYZTexture {
-public:
-    int resolution_x;
-    int resolution_y;
-    double U_scalar;
-    double V_scalar;
-    vector<vector<XYZ>> data;
-    XYZTexture(vector<vector<XYZ>>* data_ptr) {
-        data = *data_ptr;
-    }
-    XYZTexture(string file_name) {
-        const string file_n = file_name;
-        int width, height, original_no_channels;
-        int desired_no_channels = 3;
-        unsigned char* img = stbi_load(file_n.c_str(), &width, &height, &original_no_channels, desired_no_channels);
-        string output = padString("Attempting to fetch texture at path: " + file_n + "",".",100);
-        cout << output;
-        if (img == NULL) {
-            cout << "!Failed!";
-            throw invalid_argument("");
-        }
-        cout << "[Done]" << endl;
-        string process_string = padString(
-            "    ->Loading: ["+to_string(width)+
-            "px : "+to_string(height)+
-            "px] Channels: [original: "+to_string(original_no_channels)+
-            " ; loaded: "+ to_string(desired_no_channels)+"]"
-            ,".",100);
-        cout << process_string << flush;
-        
-        resolution_x = width;
-        resolution_y = height;
-        for (int y = 0; y < resolution_y; y++) {
-            data.push_back(vector<XYZ>());
-            for (int x = 0; x < resolution_x; x++) {
-                int position = y * resolution_x*3 + x*3;
-                float r = (float) img[position];
-                float g = (float) img[position + 1];
-                float b = (float) img[position + 2];
-                XYZ color = XYZ(r / 256.0, g / 256.0, b / 256.0);
-                color = (color - XYZ(0.5)) * 2;
-                data.back().push_back(color);
-;            }
-        }
-        delete[] img;
-        U_scalar = resolution_x;
-        V_scalar = resolution_y;
-        cout << "[Done]" << endl;
-    }
-    void prep() {
-        U_scalar = resolution_x;
-        V_scalar = resolution_y;
-    }
-    XYZ lookup(int x, int y) {
-        return data[y][x];
-    }
-    XYZ getUV(double U, double V) {
-        V = 1 - V;
-        int pos_x = floor(U_scalar * U);
-        int pos_y = floor(V_scalar * V);
-        return lookup(pos_x, pos_y);
-    }
-    XYZ getPixelLinear(double U, double V) {
-        double x_1 = U_scalar * U - 0.5 * U_scalar;
-        double x_2 = U_scalar * U + 0.5 * U_scalar;
-        double y_1 = V_scalar * V - 0.5 * V_scalar;
-        double y_2 = V_scalar * V + 0.5 * V_scalar;
-        int pos_x_1 = std::max(0,std::min(resolution_x-1,(int)floor(x_1)));
-        int pos_x_2 = std::max(0,std::min(resolution_x-1,(int)floor(x_2)));
-        int pos_y_1 = std::max(0,std::min(resolution_y-1,(int)floor(y_1)));
-        int pos_y_2 = std::max(0,std::min(resolution_y-1,(int)floor(y_2)));
-        XYZ c1 = lookup(pos_x_1, pos_y_1);
-        XYZ c2 = lookup(pos_x_2, pos_y_1);
-        XYZ c3 = lookup(pos_x_1, pos_y_2);
-        XYZ c4 = lookup(pos_x_2, pos_y_2);
-        double f1 = pos_x_2 - x_1;
-        double f2 = x_2 - pos_x_2;
-        double f3 = pos_y_2 - y_1;
-        double f4 = y_2 - pos_y_2;
-        XYZ c_m1 = f1 * c1 + f2 * c2;
-        XYZ c_m2 = f1 * c3 + f2 * c4;
-        return f3 * c_m1 + f4 * c_m2;
-    }
-};
-
-class Parameter {
-public:
-    XYZ static_value = 0;
-    XYZTexture* texture = nullptr;
-    Parameter(decimal X, decimal Y, decimal Z) : static_value(XYZ(X,Y,Z)) {}
-    Parameter(XYZ value) : static_value(value) {}
-    Parameter(XYZTexture* texture_ptr) : texture(texture_ptr) {}
-    Parameter(string file_name) : texture(new XYZTexture(file_name)) {}
-    void set_static(double value) {
-        static_value.X = value;
-    }
-    void set_static(XYZ value) {
-        static_value = XYZ(value);
-    }
-    void prep() {
-        if (texture != nullptr) {
-            texture->prep();
-        }
-    }
-    void set_texture(XYZTexture* texture_ptr, bool free = false) {
-        if (texture != nullptr) {
-            if (free) {
-                delete texture;
-            }
-        }
-        texture = texture_ptr;
-    }
-    void set_texture(string file_name, bool free = false) {
-        set_texture(new XYZTexture(file_name),free);
-    }
-    XYZ getXYZ(double U, double V) {
-        if (texture != nullptr) {
-            return texture->getUV(U, V);
-        }
-        else {
-            return static_value;
-        }
-    }
-    double getSingle(double U, double V) {
-        if (texture != nullptr) {
-            return texture->getUV(U, V).X;
-        }
-        else {
-            return static_value.X;
-        }
-    }
-};
-
-class MaterialSample {
-public:
-    XYZ color;
-    decimal roughness;
-    decimal metallic;
-    decimal specular;
-    XYZ emissive;
-    XYZ normal;
-
-    decimal k = 0;
-    decimal a_2 = 0;
-    decimal spec_f = 0;
-    decimal diff_f = 0;
-    decimal diff_spread = 0;
-    XYZ diff_c = XYZ();
-    XYZ diff_t = XYZ();
-    XYZ spec_color = XYZ();
-    XYZ I_spec = XYZ();
-
-    MaterialSample(XYZ _color, decimal _roughness, decimal _metallic, decimal _specular, XYZ _emissive, XYZ _normal) {
-        color = _color;
-        roughness = _roughness;
-        metallic = _metallic;
-        specular = _specular;
-        emissive = _emissive;
-        normal = _normal;
-
-        k = pow(roughness + 1, 2) / 8;
-        a_2 = roughness * roughness;
-        spec_color = get_specular_color();
-        I_spec = 1 - get_fresnel_0();
-        spec_f = get_specular_factor();
-        diff_f = get_diffuse_factor();
-        diff_c = get_diffuse_color();
-        diff_t = diff_c * diff_f;
-        decimal r_f = roughness - 0.2;
-        diff_spread = (r_f * r_f) * PI / 2;
-    }
-    decimal get_diffuse_factor() const {
-        return 1 - get_specular_factor();
-    }
-    XYZ get_fresnel_0() const {
-        return XYZ::linear_mix(metallic, XYZ(0.04), color);
-    }
-    XYZ get_diffuse_reflectance() const {
-        return color * (1 - metallic);
-    }
-    decimal get_specular_factor() const {
-        return min(max(metallic, specular), (decimal)1.0);
-    }
-    XYZ get_specular_factor_v2(decimal dot_NI) const {
-        return fast_fresnel(dot_NI);
-    }
-    XYZ get_diffuse_factor_v2(decimal dot_NI) const {
-        return XYZ(1) - fast_fresnel(dot_NI);
-    }
-    XYZ get_specular_color() const {
-        return XYZ::linear_mix(metallic, specular * XYZ(1, 1, 1), color);
-    }
-    XYZ get_diffuse_color() const {
-        return get_diffuse_reflectance() / PI;
-    }
-    XYZ get_fresnel(XYZ light_slope, XYZ normal) const {
-        XYZ specular_color = get_fresnel_0();
-        auto second_term = (1 - specular_color) * pow(1 - XYZ::dot(light_slope, normal), 5);
-        return specular_color + second_term;
-    }
-    XYZ fast_fresnel(decimal dot_NI) const {
-        decimal g = 1 - dot_NI;
-        return I_spec * (g * g * g * g * g);
-    }
-    decimal get_normal_distribution_beta(const XYZ& normal, const XYZ& half_vector) const {
-        decimal a = roughness;
-        decimal dot = XYZ::dot(normal, half_vector);
-        decimal exponent = -(1 - pow(dot, 2)) / (pow(a * dot, 2));
-        decimal base = 1 / (PI * pow(a, 2) * pow(dot, 4));
-        decimal final = base * exp(exponent);
-
-        return final;
-    }
-    decimal get_normal_distribution_GGXTR(const XYZ& normal, const XYZ& half_vector) const {
-        decimal a = roughness;
-        decimal dot = XYZ::dot(normal, half_vector);
-        decimal final = (a * a)
-            /
-            (PI * pow((dot * dot) * (a * a - 1) + 1, 2));
-
-        return final;
-    }
-    decimal fast_normal_dist(const decimal dot_NH) const {
-        decimal a_2 = roughness * roughness;
-        decimal g = dot_NH * dot_NH * (a_2 - 1) + 1;
-        return dot_NH * (a_2) / (PI * g * g);
-    }
-    decimal geoSchlickGGX(const XYZ& normal, const XYZ& vector, decimal k) const {
-
-        decimal dot = XYZ::dot(normal, vector);
-
-        return dot / (dot * (1 - k) + k);
-        //return 1;
-
-    }
-    decimal fastGeo_both(const decimal dot_NO, const decimal dot_NI) const {
-        return dot_NO / (dot_NO * (1 - k) + k) * dot_NI / (dot_NI * (1 - k) + k);
-    }
-    XYZ diffuse_BRDF(decimal dot_NI) const {
-    
-        //return get_diffuse_factor_v2(dot_NI) * get_diffuse_reflectance();
-        return get_diffuse_reflectance();
-    }
-    XYZ specular_BRDF(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
-        decimal dot_NI = XYZ::dot(normal, input_slope);
-        decimal dot_NO = XYZ::dot(normal, output_slope);
-        if (dot_NI <= 0 || dot_NO <= 0) {
-            return XYZ(0, 0, 0);
-        }
-        XYZ half_vector = XYZ::normalize(XYZ::add(input_slope, output_slope));
-        decimal dot_HO = XYZ::dot(half_vector, output_slope);
-        decimal dot_NH = XYZ::dot(normal, half_vector);
-        XYZ fresnel = fast_fresnel(dot_HO);
-        decimal geo = fastGeo_both(dot_NO, dot_NI);
-        decimal normal_dist = fast_normal_dist(dot_NH);
-        decimal divisor = 4 * dot_NO;
-
-        return geo * normal_dist * fresnel;// / divisor;
-    }
-    XYZ fast_BRDF_co(const XYZ& normal, const XYZ& input_slope, XYZ& output_slope) const {
-        decimal dot_NI = XYZ::dot(normal, input_slope);
-        decimal dot_NO = XYZ::dot(normal, output_slope);
-        if (dot_NI <= 0 || dot_NO <= 0) {
-            return XYZ(0, 0, 0);
-        }
-        XYZ half_vector = XYZ::normalize(XYZ::add(input_slope, output_slope));
-        decimal dot_HO = XYZ::dot(half_vector, output_slope);
-        decimal dot_NH = XYZ::dot(normal, half_vector);
-        XYZ fresnel = fast_fresnel(dot_HO);
-        decimal geo = fastGeo_both(dot_NO, dot_NI);
-        decimal normal_dist = fast_normal_dist(dot_NH);
-        decimal divisor = 4 * dot_NI * dot_NO;
-
-        return ((geo * normal_dist * fresnel) / divisor + diffuse_BRDF(dot_NI)) * dot_NI;
-
-    }
-    XYZ random_bounce(const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) const {
-        decimal prob = fRand(0, 1);
-        if (prob < diff_f) {
-            return Matrix3x3::aligned_random(PI / 2, diffuse_rotation);
-        }
-        else {
-            return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
-        }
-    }
-    XYZ biased_diffuse_bounce(const Matrix3x3& diffuse_rotation, float r1_min = 0, float r1_max = 1, float r2_min = 0, float r2_max = 1) const {
-        return Matrix3x3::aligned_biased_hemi(diffuse_rotation, r1_min, r1_max, r2_min, r2_max);
-    }
-    XYZ unbiased_diffuse_bounce(const Matrix3x3& diffuse_rotation) const {
-        return Matrix3x3::aligned_unbiased_hemi(diffuse_rotation);
-    }
-    XYZ reflective_bounce(const Matrix3x3& reflection_rotation) const {
-        return Matrix3x3::aligned_random(diff_spread, reflection_rotation);
-    }
-    
-    XYZ calculate_emissions() const {
-        return emissive;
-    }
-};
-
-class Material {
-public:
-    Parameter color     = Parameter(0);
-    Parameter roughness = Parameter(0.1);
-    Parameter metallic  = Parameter(0);
-    Parameter specular  = Parameter(0);
-    Parameter emissive  = Parameter(0);
-    Parameter normal    = Parameter(0);
-
-    bool use_normals = false;
-
-    Material() {}
-
-    void prep() {
-        color.prep();
-        roughness.prep();
-        metallic.prep();
-        specular.prep();
-        emissive.prep();
-        normal.prep();
-    }
-    MaterialSample sample_UV(decimal U, decimal V) {
-        return MaterialSample(
-            color.getXYZ(U, V),
-            roughness.getSingle(U, V),
-            metallic.getSingle(U, V),
-            specular.getSingle(U, V),
-            emissive.getXYZ(U, V),
-            normal.getXYZ(U, V)
-        );
-    }
-};
 
 class Primitive {
 public:
@@ -1550,7 +263,7 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
     }
 };
 
-struct PTri_AVX { //literally 0.7kB of memory. What have I done.
+struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
     m256_vec3 p1;
     m256_vec3 p1p2;
     m256_vec3 p1p3;
@@ -1610,8 +323,8 @@ struct PTri_AVX { //literally 0.7kB of memory. What have I done.
         VecLib::dot_mul_avx(slope, qvec, invDet, uv.Y);
         VecLib::dot_mul_avx(T.p1p3, qvec, invDet, output.X); //t
 
-        __m256 u_pass = _mm256_cmp_ps(uv.X, _mm256_set1_ps(0), _CMP_GE_OQ);
-        __m256 v_pass = _mm256_cmp_ps(uv.Y, _mm256_set1_ps(0), _CMP_GE_OQ);
+        __m256 u_pass = _mm256_cmp_ps(uv.X, AVX_ZEROS, _CMP_GE_OQ);
+        __m256 v_pass = _mm256_cmp_ps(uv.Y, AVX_ZEROS, _CMP_GE_OQ);
         __m256 uv_pass = _mm256_cmp_ps(
             _mm256_add_ps(
                 uv.X,
@@ -1621,19 +334,20 @@ struct PTri_AVX { //literally 0.7kB of memory. What have I done.
             _CMP_LE_OQ
         );
 
-        __m256 final_mask = _mm256_and_ps(
+        output.X = _mm256_and_ps(
             uv_pass,
-            _mm256_and_ps(
-                u_pass,
-                v_pass
-            )
+            output.X
         );
 
         output.X = _mm256_and_ps(
-            final_mask,
+            u_pass,
             output.X
         );
-            
+           
+        output.X = _mm256_and_ps(
+            v_pass,
+            output.X
+        );
 
         output.Y = _mm256_fmadd_ps( //u
             uv.X,
@@ -1732,13 +446,13 @@ public:
         return intersection_check_MoTru(T, position, slope);
     }
     static XYZ random(const PackagedTri& T) {
-        float r1 = fRand(0, 1);
-        float r2 = fRand(0, 1);
+        float r1 = gen.fRand(0, 1);
+        float r2 = gen.fRand(0, 1);
         if (r1 + r2 > 1) {
             r1 = 1 - r1;
             r2 = 1 - r2;
         }
-        return r1 * T.p1p2 + r2 * T.p1p3;
+        return T.p1 + r1 * T.p1p2 + r2 * T.p1p3;
     }
     static XYZ get_normal(XYZ normal, XYZ relative_position) {
         return (XYZ::dot(normal, relative_position) > 0) ? normal : -normal;
@@ -2515,10 +1229,10 @@ private:
                         left_max = XYZ::max(v.max, left_max);
                         right_count--;
                     }
-                    debug.push_back(vector<int>());
-                    debug.back().push_back(left_count);
-                    debug.back().push_back(right_count);
-                    debug.back().push_back(index);
+                    //debug.push_back(vector<int>());
+                    //debug.back().push_back(left_count);
+                    //debug.back().push_back(right_count);
+                    //debug.back().push_back(index);
                     index++;
                 }
                 
@@ -2833,12 +1547,15 @@ private:
 int total_tris = 0; 
 int nodes_traversed = 0;
 
+
 class BVH_AVX {
 public:
     m256_vec3 max;
     m256_vec3 min;
     unsigned int leaf_size[8];
     unsigned int indexes[8];
+    int parent_index;
+    int self_index;
     BVH_AVX(vector<BVH*>& batch) {
         vector<XYZ> max_vec;
         vector<XYZ> min_vec;
@@ -2859,7 +1576,7 @@ public:
 
 
     }
-    __m256 intersection(const m256_vec3& fusedorigin, const m256_vec3& inv_slope) const { //holy mother of moving data. I pray for you, my cpu, I pray
+    __m256 intersectionv1(const m256_vec3& fusedorigin, const m256_vec3& inv_slope) const { //holy mother of moving data. I pray for you, my cpu, I pray
         __m256 tx1 = _mm256_fmadd_ps(min.X, inv_slope.X, fusedorigin.X);
         __m256 tx2 = _mm256_fmadd_ps(max.X, inv_slope.X, fusedorigin.X);
         __m256 ty1 = _mm256_fmadd_ps(min.Y, inv_slope.Y, fusedorigin.Y);
@@ -2882,19 +1599,74 @@ public:
         __m256 diff = _mm256_sub_ps(tmax, tmin);
         __m256 masked_diff = _mm256_max_ps(
             diff,
-            _mm256_set1_ps(0)
+            AVX_ZEROS
         );
-        __m256 return_mask = _mm256_div_ps(
+        __m256 return_mask = _mm256_cmp_ps(
             masked_diff,
-            diff
+            diff,
+            _CMP_EQ_OQ
         );
-        __m256 final = _mm256_mul_ps(
+        __m256 final = _mm256_and_ps(
             _mm256_add_ps(
                 tmin,
                 masked_diff
             ),
             return_mask
         );
+        //__m256 diff_is_pos = _mm256_cmp_ps(diff, AVX_ZEROS, _CMP_GT_OQ);
+
+        return final;
+    }
+    __m256 intersection(const m256_vec3& fusedorigin, const m256_vec3& inv_slope) const { //holy mother of moving data. I pray for you, my cpu, I pray
+        __m256 tx1 = _mm256_fmadd_ps(min.X, inv_slope.X, fusedorigin.X);
+        __m256 tx2 = _mm256_fmadd_ps(max.X, inv_slope.X, fusedorigin.X);
+        __m256 ty1 = _mm256_fmadd_ps(min.Y, inv_slope.Y, fusedorigin.Y);
+        __m256 ty2 = _mm256_fmadd_ps(max.Y, inv_slope.Y, fusedorigin.Y);
+        __m256 tz1 = _mm256_fmadd_ps(min.Z, inv_slope.Z, fusedorigin.Z);
+        __m256 tz2 = _mm256_fmadd_ps(max.Z, inv_slope.Z, fusedorigin.Z);
+
+        __m256 tminx = _mm256_min_ps(tx1, tx2);
+        __m256 tminy = _mm256_min_ps(ty1, ty2);
+        __m256 tminz = _mm256_min_ps(tz1, tz2);
+        __m256 tmaxx = _mm256_max_ps(tx1, tx2);
+        __m256 tmaxy = _mm256_max_ps(ty1, ty2);
+        __m256 tmaxz = _mm256_max_ps(tz1, tz2);
+
+        __m256 tmin = _mm256_max_ps(
+            tminz,
+            _mm256_max_ps(
+                tminy,
+                tminx
+            ));
+        __m256 tmax = _mm256_min_ps(
+            tmaxz,
+            _mm256_min_ps(
+                tmaxy,
+                tmaxx
+            ));
+        __m256 diff = _mm256_sub_ps(tmin, tmax);
+        __m256 return_mask = _mm256_cmp_ps(
+            tmin,
+            tmax,
+            _CMP_LT_OQ
+        );
+        __m256 min_mask = _mm256_cmp_ps(
+            tmin,
+            AVX_ZEROS,
+            _CMP_GE_OQ
+        );
+        __m256 final = _mm256_and_ps(
+            _mm256_add_ps(
+                tmax,
+                _mm256_and_ps(
+                    diff,
+                    min_mask
+                )
+            ),
+            return_mask
+        );
+        //__m256 diff_is_pos = _mm256_cmp_ps(diff, AVX_ZEROS, _CMP_GT_OQ);
+
         return final;
     }
     static pair<vector<BVH_AVX>*, vector<PackagedTri>*> collapse(BVH* top) {
@@ -2961,6 +1733,8 @@ private:
                 int parent_index = selection.second.first;
                 int point_back_index = selection.second.second;
                 BVH_AVX ABVH(batch);
+                ABVH.parent_index = parent_index;
+                ABVH.self_index = point_back_index;
                 for (int i = 0; i < batch.size(); i++) {
                     if (ABVH.leaf_size[i] > 0) {
                         ABVH.indexes[i] = tri_vec->size();
@@ -2989,15 +1763,12 @@ private:
 struct PackagedRay {
     XYZ position;
     XYZ slope;
-    XYZ coefficient;
-    XYZ* output;
     char generation = 0;
+    int starting_index = 0;
     PackagedRay() {};
-    PackagedRay(XYZ _position, XYZ _slope, XYZ co, XYZ* out, char gen) :
+    PackagedRay(XYZ _position, XYZ _slope, char gen) :
         position(_position),
         slope(_slope),
-        coefficient(co),
-        output(out),
         generation(gen)
     {}
     void move(decimal distance) {
@@ -3013,11 +1784,15 @@ public:
     void (*_prep)(Lens* self, int resolution_x, int resolution_y, int subdivision_size);
     Lens* (*_clone)(Lens* self);
     XYZ(*_at)(Lens* self, int p_x, int p_y, int sample_index);
+    XYZ(*_random_at)(Lens* self, int p_x, int p_y);
     void prep(int resolution_x, int resolution_y, int subdivision_size) {
         _prep(this, resolution_x, resolution_y, subdivision_size);
     }
     XYZ at(int p_x, int p_y, int sample_index) {
         return _at(this, p_x, p_y, sample_index);
+    }
+    XYZ random_at(int p_x, int p_y) {
+        return _random_at(this, p_x, p_y);
     }
     Lens* clone() {
         Lens* obj = _clone(this);
@@ -3035,8 +1810,11 @@ public:
     decimal height;
     vector<XY> subdiv_offsets;
     vector<vector<XY>> outputs;
+    float pixel_width;
+    float pixel_height;
     RectLens(decimal _width, decimal _height) :
         width(_width), height(_height) {
+        _random_at = _random_at_function;
         _at = _at_function;
         _prep = _prep_function;
         _clone = _clone_function;
@@ -3048,6 +1826,8 @@ private:
         decimal height = self_rect->height;
         decimal partial_width = width / resolution_x;
         decimal partial_height = height / resolution_y;
+        self_rect->pixel_width = partial_width;
+        self_rect->pixel_height = partial_height;
         decimal offset_x = -width / 2;
         decimal offset_y = -height / 2;
         decimal subdiv_width_x = partial_width / subdivision_count;
@@ -3078,6 +1858,11 @@ private:
         RectLens* self_rect = (RectLens*)self;
         XY pos = self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index];
         return XYZ(pos.X,0,pos.Y);
+    }
+    static XYZ _random_at_function(Lens* self, int p_x, int p_y) {
+        RectLens* self_rect = (RectLens*)self;
+        XY pos = self_rect->outputs[p_y][p_x] + XY(gen.fRand(0, self_rect->pixel_width), gen.fRand(0, self_rect->pixel_height));
+        return XYZ(pos.X, 0, pos.Y);
     }
     static Lens* _clone_function(Lens* self) {
         RectLens* rect_self = (RectLens*)self;
@@ -3118,6 +1903,10 @@ public:
         return Quat::applyRotation(XYZ::slope(XYZ(0,0,0), lens->at(p_x, p_y, sample_index) + focal_position),rotation);
     }
 
+    XYZ random_slope_at(int p_x, int p_y) {
+        return Quat::applyRotation(XYZ::slope(XYZ(0, 0, 0), lens->random_at(p_x, p_y) + focal_position), rotation);
+    }
+
     Camera* clone() {
         Lens* new_lens = lens->clone();
         Camera* obj = new Camera(position, new_lens, focal_position);
@@ -3144,13 +1933,17 @@ const Matrix3x3 ACESInputMat = Matrix3x3( //https://github.com/TheRealMJP/Baking
 );
 
 struct CastResults {
+    static const decimal default_distance;
     XYZ normal;
     Material* material;
     decimal distance;
     XYZ UV = XYZ(-1);
-    CastResults() : normal(XYZ()), material(nullptr), distance(999999999999999) {};
-    CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat), distance(9999999999999) {}
+    int parent_index = 0;
+    CastResults() : normal(XYZ()), material(nullptr), distance(default_distance) {};
+    CastResults(XYZ _normal, Material* _mat) : normal(_normal), material(_mat), distance(default_distance) {}
 };
+
+const decimal CastResults::default_distance = 99999999999999999;
 
 struct Casting_Diagnostics {
     long reflections_cast = 0;
@@ -3172,9 +1965,28 @@ public:
     vector<BVH_AVX> avx_bvh;
     short monte_carlo_generations = 2;
     short max_generations = 3;
-    short monte_carlo_max = 256;
+    short monte_carlo_max = 64;
     float monte_carlo_modifier = 1.0/32;
 };
+
+class MIS_weights {
+public:
+    float diffuse_weight = 0.3;
+    vector<pair<PackagedTri, float>> light_weights;
+    MIS_weights(vector<PackagedTri> lights) {
+        for (auto& light : lights) {
+            light_weights.push_back(pair<PackagedTri, float>(light, (1-diffuse_weight) / lights.size()));
+        }
+    }
+};
+
+class MIS {
+public:
+    vector<MIS_weights> levels;
+    double minimum_diffuse_weight = 0.1;
+};
+
+static thread_local MIS MIS_data;
 
 class Scene {
 public:
@@ -3267,7 +2079,6 @@ public:
             cout << padString("[BVH] Flattening", ".", 100) << flush;
 
             PS->emissive_tris = bvh->get_emissive_tris();
-
 #if USE_AVX_BVH
             auto collapse_out = BVH_AVX::collapse(bvh);
             PS->avx_bvh = *collapse_out.first;
@@ -3320,13 +2131,185 @@ public:
 };
 #define AVX_STACK_SIZE 256
 
-volatile int global_counter = 0;
+template <typename t> struct DisArray { 
+    //discontinous array. indexes are not stored continously, therefore there is no performance penalty for gaps in index. its essentially a map masquerading as an array
+    //this implementation heavily favors smaller arrays, as searching for an index is O(n)
+    vector<int> entries;
+    vector<t> values;
+    int get_index(int index) {
+        for (int i = 0; i < entries.size(); i++) {
+            if (entries[i] == index) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    void insert(int index, typename t = t()) {
+        entries.push_back(index);
+        std::sort(entries.begin(), entries.end());
+        auto at = get_index(index);
+        if (at == values.size() - 1) {
+            values.push_back(t);
+        }
+        else {
+            values.insert(value.begin() + at, t);
+        }
+    }
+    t at(int val) const {
+        return operator[val];
+    }
+    t operator[](int val) const {
+        return values[get_index(val)];
+    }
+};
+
+
+
+struct RaypacketPartitioner {
+    double part_size = 0.05;
+    XYZ origin = XYZ(0,0,0);
+    int rays_queued = 0;
+    DisArray<DisArray<DisArray<vector<PackagedRay>>>> partitions;
+    void add_ray(PackagedRay& R) {
+        rays_queued++;
+        int x_index = floor(R.position.X / part_size);
+        int y_index = floor(R.position.Y / part_size);
+        int z_index = floor(R.position.Z / part_size);
+        if (!partitions.get_index(x_index)) {
+            partitions.insert(x_index);
+        }
+        auto x_partition = partitions[x_index];
+        if (!x_partition.get_index(y_index)) {
+            x_partition.insert(y_index);
+        }
+        auto y_partition = partitions[y_index];
+        if (!y_partition.get_index(z_index)) {
+            y_partition.insert(z_index);
+        }
+        auto z_partition = partitions[z_index];
+    }
+};
+
 class RayEngine {
 public:
-    PackagedScene* data;
+    static PackagedScene* data;
+    vector<
     RayEngine() {}
     void load_scene(PackagedScene* PS) {
         data = PS;
+    }
+    void iterativeBVH_AVX_unordered(int starting_index, CastResults& res, const XYZ& position, const XYZ& slope) {
+        //global_counter++;
+        m256_vec3 position_avx(position);
+        m256_vec3 slope_avx(slope);
+        m256_vec3 fusedposition(-1 * position / slope);
+        m256_vec3 inv_slope(1 / slope);
+        int stack[AVX_STACK_SIZE];
+        int exclude_stack[AVX_STACK_SIZE];
+        float distances[AVX_STACK_SIZE];
+        int tri_count[AVX_STACK_SIZE];
+        int parent_stack[AVX_STACK_SIZE];
+        int stack_index = 0;
+
+        stack[0] = starting_index;
+        BVH_AVX& start = data->avx_bvh[stack[0]];
+        exclude_stack[0] = start.self_index;
+        parent_stack[0] = 0;
+        distances[0] = 0;
+        tri_count[0] = 0;
+        while (stack_index >= 0) {
+            const float dist = distances[stack_index];
+            const int self_triangles = tri_count[stack_index];
+            if (dist >= res.distance) {
+                stack_index--;
+                continue;
+            };
+            if (self_triangles == 0) {
+                int my_index = stack[stack_index];
+                const BVH_AVX& current = data->avx_bvh[my_index];
+                int exclude_index = exclude_stack[stack_index];
+                stack_index--;
+                if (res.distance == CastResults::default_distance && current.parent_index>(-1) && exclude_index>-1 && my_index>0) {
+                    stack_index++;
+                    stack[stack_index] = current.parent_index;
+                    exclude_stack[stack_index] = current.self_index;
+                }
+                current.parent_index > -1;
+                auto m256_results = current.intersection(fusedposition, inv_slope);
+                //float results[8];
+                float* results = (float*)&m256_results;
+                if (exclude_index != -1) results[exclude_index] = -1;
+                int sorted_index[8];
+                int sorted_index_size = 0;
+                for (int i = 0; i < 8; i++) {
+                    float& num = results[i];
+                    if (num > 0) {
+                        int j = sorted_index_size - 1;
+                        for (; j >= 0; j--) {
+                            if (results[sorted_index[j]] > num) {
+                                sorted_index[j + 1] = sorted_index[j];
+                            }
+                            else break;
+                        }
+                        sorted_index[j + 1] = i;
+                        sorted_index_size++;
+                    }
+                }
+                for (int i = sorted_index_size - 1; i >= 0; i--) {
+                    int selection_index = sorted_index[i];
+                    float dist2 = results[selection_index];
+                    if (dist2 <= 0) {
+                        break;
+                    }
+                    stack_index++;
+                    stack[stack_index] = current.indexes[selection_index];
+                    distances[stack_index] = dist2;
+                    tri_count[stack_index] = current.leaf_size[selection_index];
+                    exclude_stack[stack_index] = -1;
+                    parent_stack[stack_index] = my_index;
+
+                }
+
+            }
+            else {
+                int start_index = stack[stack_index];
+                stack_index--;
+                for (int i = 0; i < self_triangles; i++) {
+#if !USE_AVX_TRI
+
+                    const PackagedTri& t = (data->tri_data)[i + start_index];
+                    XYZ distance = Tri::intersection_check_MoTru(t, position, slope);
+                    if (distance.X >= 0) {
+                        if (distance.X < res.distance) {
+                            res.distance = distance.X;
+                            res.normal = Tri::get_normal(t.normal, position + distance * slope * 0.99 - t.origin_offset);
+                            res.material = t.material;
+                            res.UV = distance;
+                        }
+                    }
+#else
+
+                    const PTri_AVX& PTri_AVX_pack = (data->avx_tri_data)[i + start_index];
+                    m256_vec3 intersection_stats;
+                    m256_vec3 normal_stats;
+                    PTri_AVX::intersection_check(PTri_AVX_pack, position_avx, slope_avx, intersection_stats);
+                    PTri_AVX::get_normal(PTri_AVX_pack, position_avx, normal_stats);
+
+                    float* dists = (float*)&intersection_stats.X;
+                    for (int i = 0; i < 8; i++) {
+                        if (dists[i] > 0 && dists[i] < res.distance) {
+                            res.distance = dists[i];
+                            res.normal = normal_stats.at(i);
+                            res.material = PTri_AVX_pack.materials[i];
+                            res.UV = intersection_stats.at(i);
+                            res.parent_index = parent_stack[stack_index + 1];
+                        }
+                    }
+#endif
+                }
+
+            }
+        }
     }
     void iterativeBVH_AVX(CastResults& res, const XYZ& position, const XYZ& slope) {
         //global_counter++;
@@ -3354,12 +2337,6 @@ public:
                 auto m256_results = current.intersection(fusedposition, inv_slope);
                 //float results[8];
                 float* results = (float*)&m256_results;
-                //for (int i = 0; i < 8;i++) {
-                //    XYZ max = current.max.at(i);
-                //    XYZ min = current.min.at(i);
-                //    float t = BVH::intersection(max, min, position, 1 / slope);
-                //    results[i] = t;
-                //}
                 int sorted_index[8];
                 int sorted_index_size = 0;
                 for (int i = 0; i < 8; i++) {
@@ -3380,7 +2357,7 @@ public:
                     int selection_index = sorted_index[i];
                     float dist2 = results[selection_index];
                     if (dist2 <= 0) {
-                        continue;
+                        break;
                     }
                     stack_index++;
                     stack[stack_index] = current.indexes[selection_index];
@@ -3388,31 +2365,28 @@ public:
                     tri_count[stack_index] = current.leaf_size[selection_index];
                     
                 }
-                //float temp[8];
+                
+                //__m256 temp_m256 = simd_sort_1V(_mm256_max_ps(m256_results,AVX_ZEROS));
+                //float* temp = (float*) & temp_m256;
+                //
+                //float values[8];
+                //int pointer[8];
+                //int size = 0;
                 //for (int i = 0; i < 8; i++) {
-                //    temp[i] = results[i];
-                //}
-                //for (int i = 7; i >= 1; i--) {
-                //    for (int j = i; j >= 1; j--) {
-                //        float j1 = temp[j];
-                //        float j2 = temp[j - 1];
-                //        if (j1 < j2) {
-                //            temp[j - 1] = j1;
-                //            temp[j] = j2;
-                //        }
+                //    if (results[i] > 0) {
+                //        values[size] = results[i];
+                //        pointer[size] = i;
+                //        size++;
                 //    }
                 //}
                 //
-                //for (int i = 7; i >= 0; i--) {
+                //for (int i = 7; i > 7-size; i--) {
                 //    float dist2 = temp[i];
                 //    int index = 0;
-                //    if (dist2 <= 0) {
-                //        break;
-                //    }
-                //    for (int k = 7; k >= 0; k--) {
-                //        if (results[k] == dist2) {
-                //            index = k;
-                //            results[k] = -1;
+                //    for (int k = size-1; k >= 0; k--) {
+                //        if (values[k] == dist2) {
+                //            index = pointer[k];
+                //            values[k] = -1;
                 //            break;
                 //        }
                 //    }
@@ -3552,14 +2526,15 @@ public:
             }
         }
     }
-    void navBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope) {
+    void navBVH(CastResults& res, const XYZ& position, const XYZ& slope, const XYZ& inv_slope, int starting_index) {
         #if USE_AVX_BVH
+        //iterativeBVH_AVX_unordered(starting_index, res, position, slope);
         iterativeBVH_AVX(res, position, slope);
         #else
         iterativeBVH(res, position, slope, inv_slope);
         #endif
     }
-    CastResults execute_bvh_cast(XYZ& position, const XYZ& slope) {
+    CastResults execute_bvh_cast(XYZ& position, const XYZ& slope, int starting_index) {
         CastResults returner;
         for (const PackagedSphere& s : data->sphere_data) {
             decimal distance = Sphere::intersection_check(s.origin, s.radius, position, slope);
@@ -3582,7 +2557,7 @@ public:
             }
         }
         XYZ inv_slope = XYZ(1) / slope;
-        navBVH(returner, position, slope, inv_slope);
+        navBVH(returner, position, slope, inv_slope, starting_index);
         position += returner.distance * slope*0.999;
         return returner;
     }
@@ -3623,143 +2598,204 @@ public:
         position += returner.distance * slope;
         return returner;
     }
-    CastResults execute_ray_cast(XYZ& position, const XYZ& slope) {
-        return execute_bvh_cast(position, slope);
+    CastResults execute_ray_cast(XYZ& position, const XYZ& slope, int starting_index) {
+        return execute_bvh_cast(position, slope, starting_index);
         //return execute_naive_cast(position,slope);
         
     }
-    void process_ray(Casting_Diagnostics& stats, PackagedRay& ray_data) {
+    XYZ process_ray(Casting_Diagnostics& stats, PackagedRay& ray_data) {
         stats.rays_processed++;
-        CastResults results = execute_ray_cast(ray_data.position, ray_data.slope);
+        CastResults results = execute_ray_cast(ray_data.position, ray_data.slope, ray_data.starting_index);
         //*ray_data.output += ray_data.coefficient * ((results.normal)+1)/2;
-        if (DEPTH_VIEW) {
-            (*ray_data.output) += XYZ(1, 1, 1) * (4 - ray_data.position.Z) * 5;
-            return;
-        }
         if (results.material == nullptr) {
-            (*ray_data.output) += ray_data.coefficient * XYZ(0);
+            return XYZ(0);
         }
-        else {
-            MaterialSample material = results.material->sample_UV(results.UV.Y, results.UV.Z);
-            XYZ normal = results.normal;
-            if (!XYZ::equals(XYZ(0, 0, 0), material.normal)) {
-                normal = material.normal;
+        MaterialSample material = results.material->sample_UV(results.UV.Y, results.UV.Z);
+        XYZ aggregate = XYZ();
+        XYZ normal = results.normal;
+        if (!XYZ::equals(XYZ(0, 0, 0), material.normal)) {
+            normal = material.normal;
+        }
+
+        if (DRAW_UV) {
+            if (results.UV.X != -1) {
+                XYZ color;
+                color.X = results.UV.Y;
+                color.Y = results.UV.Z;
+                color.Z = 1 - color.X - color.Y;
+                return color * 1;
             }
+        }
+        if (DRAW_NORMAL) {
+            return (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+        }
+        if (DRAW_COLOR) {
+            return material.color;
+        }
+        //if (DRAW_BOUNCE_DIRECTION) {
+        //    if (ray_data.remaining_monte_carlo == 0)
+        //        (*ray_data.output) += ray_data.coefficient * (ray_data.position / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+        //    //continue;
+        //}
+        //if (ray_data.generation >= data->monte_carlo_max || ray_data.generation == 0) {
+            aggregate += material.calculate_emissions();
+        //}
 
-            if (DRAW_UV) {
-                if (results.UV.X != -1) {
-                    XYZ color;
-                    color.X = results.UV.Y;
-                    color.Y = results.UV.Z;
-                    color.Z = 1 - color.X - color.Y;
-                    (*ray_data.output) += color * 1;
-                    return;
-                }
-            }
-            if (DRAW_NORMAL) {
-                (*ray_data.output) += ray_data.coefficient * (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
-                return;
-            }
-            if (DRAW_COLOR) {
-                (*ray_data.output) += material.color;
-                return;
-            }
-            if (DRAW_EMISSIVE) {
-                (*ray_data.output) += material.emissive;
-                return;
-            }
-            //if (DRAW_BOUNCE_DIRECTION) {
-            //    if (ray_data.remaining_monte_carlo == 0)
-            //        (*ray_data.output) += ray_data.coefficient * (ray_data.position / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
-            //    //continue;
-            //}
-            (*ray_data.output) += ray_data.coefficient * material.calculate_emissions();
-            if (ray_data.generation == 2) {
-                //(*ray_data.output) += ray_data.coefficient * (ray_data.position / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
-            }
+        int bounce_count = data->monte_carlo_max * pow(data->monte_carlo_modifier, ray_data.generation);
+        XYZ flipped_output = XYZ::flip(ray_data.slope);
+        XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), normal);
 
-            int bounce_count = data->monte_carlo_max * pow(data->monte_carlo_modifier, ray_data.generation);
-            XYZ flipped_output = XYZ::flip(ray_data.slope);
-            XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), normal);
+        Quat normal_rot = Quat::makeRotationFromY(normal);
+        Quat reflection_rot = Quat::makeRotationFromY(reflection_slope);
+        Matrix3x3 normal_rot_m = Matrix3x3::quatToMatrix(normal_rot);
+        Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
+        //ray_data.PreLL.value = XYZ(0, 0, 100);
 
-            Quat normal_rot = Quat::makeRotationFromY(normal);
-            Quat reflection_rot = Quat::makeRotationFromY(reflection_slope);
-            Matrix3x3 normal_rot_m = Matrix3x3::quatToMatrix(normal_rot);
-            Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
-            //ray_data.PreLL.value = XYZ(0, 0, 100);
+        if (ray_data.generation >= data->max_generations) return aggregate;
+        if (ray_data.generation < data->monte_carlo_generations) {
+            XYZ diffuse_contribution = XYZ();
+            XYZ lights_contribution = XYZ();
+#if ENABLE_MIS
+            vector<XYZ> light_contributions;
+            vector<XYZ> raw_light_contributions;
+            vector<XYZ> average_light_coefficients;
 
-            if (ray_data.generation >= data->max_generations) return;
-            if (ray_data.generation < data->monte_carlo_generations) {                
-                float diffuse_split = 1;
-                float specular_split = 1 - diffuse_split;
-                int diffuse_bounces = bounce_count * diffuse_split;
-                int specular_bounces = bounce_count * specular_split;
-                if (diffuse_bounces < 4) diffuse_bounces = 4;
-                int diffuse_Vslices = floor(log2(diffuse_bounces) - 1);
-                int diffuse_Rslices = floor(diffuse_bounces / diffuse_Vslices);
-                float diffuse_V_increment = 1.0 / diffuse_Vslices;
-                float diffuse_R_increment = 1.0 / diffuse_Rslices;
-                diffuse_bounces = diffuse_Vslices * diffuse_Rslices;
-                float diffuse_V_position = 0;
-                float diffuse_R_position = 0;
+            MIS_weights& weights = MIS_data.levels[ray_data.generation];
+            float lights_weight = 0.1;//(1 - weights.diffuse_weight);
+            float diffuse_weight = 0.9;//weights.diffuse_weight;
 
+            int lights_allowance = lights_weight * bounce_count;
+            int diffuse_allowance = diffuse_weight * bounce_count;
 
-                for (int i = 0; i < diffuse_bounces; i++) {
-                    //if (i % diffuse_Rslices == 0 && i != 0) {
-                    //    diffuse_V_position+=diffuse_V_increment;
-                    //}
-                    //diffuse_R_position += diffuse_R_increment;
-                    //if (diffuse_R_position > 1) diffuse_R_position -= 1;
-                    //XYZ diffuse_slope = material.biased_diffuse_bounce(
-                    //    normal_rot_m
-                    //    ,diffuse_V_position
-                    //    ,diffuse_V_position+diffuse_V_increment
-                    //    ,diffuse_R_position
-                    //    ,diffuse_R_position+diffuse_R_increment
-                    //);
-                    XYZ diffuse_slope = material.biased_diffuse_bounce(
-                        normal_rot_m
-                    );
-                    if (DRAW_BOUNCE_DIRECTION) {
-                        if (ray_data.generation == 1)
-                            (*ray_data.output) += ray_data.coefficient / diffuse_bounces * (diffuse_slope / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
-                        //continue;
-                    }
+            int diffuse_bounces = diffuse_allowance;
+#else
+            int diffuse_bounces = bounce_count;
+#endif
+            if (diffuse_bounces < 4) diffuse_bounces = 4;
+            int diffuse_Vslices = floor(log2(diffuse_bounces) - 1);
+            int diffuse_Rslices = floor(diffuse_bounces / diffuse_Vslices);            
+            diffuse_bounces = diffuse_Vslices * diffuse_Rslices;
+            double diffuse_multiplier = 1.0 / diffuse_bounces;
+#if ENABLE_MIS
+            int light_ray_count_multiplier = 2.0;
 
-                    //XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, diffuse_slope, flipped_output);
-                    XYZ return_coefficient = ray_data.coefficient * material.diffuse_BRDF(XYZ::dot(normal, diffuse_slope));
-                    if (XYZ::magnitude(return_coefficient) < 0.0000001) {
-                        continue;
-                    }
-                    return_coefficient = return_coefficient / bounce_count * diffuse_split;
+            bounce_count = diffuse_bounces + lights_allowance;
+            double light_multiplier = 1.0 / bounce_count / light_ray_count_multiplier;
+                 diffuse_multiplier = 1.0 / bounce_count / diffuse_weight;
+
+            for (int light_index = 0; light_index < weights.light_weights.size(); light_index++) {
+
+                PackagedTri& light = weights.light_weights[light_index].first;
+                float       weight = weights.light_weights[light_index].second;
+                
+                XYZ     contribution = XYZ();
+                XYZ raw_contribution = XYZ();
+                XYZ average_coefficient = XYZ();
+                
+                float relative_weight = weight / lights_weight;
+                int    allocated_rays = std::max(1.0f,lights_allowance * relative_weight);
+
+                XYZ np1 = XYZ::normalize(light.p1);
+                XYZ np2 = XYZ::normalize(light.p1p2 + light.p1);
+                XYZ np3 = XYZ::normalize(light.p1p3 + light.p1);
+
+                XYZ np1p2 = np2 - np1;
+                XYZ np1p3 = np3 - np1;
+
+                double area_est = abs(XYZ::cross(np1p2, np1p3).magnitude());
+
+                float arc_estimation = area_est/12.57;
+
+                allocated_rays *= light_ray_count_multiplier; //poop
+
+                for (int i = 0; i < allocated_rays; i++) {
+                    XYZ point = Tri::random(light);
+                    float distance = XYZ::distance(ray_data.position, point);
+                    XYZ slope = XYZ::slope(ray_data.position, point);
+                    XYZ return_coefficient = material.diffuse_BRDF_unweighted(XYZ::dot(normal,slope)) * arc_estimation;
+                    XYZ final_return_coefficient = return_coefficient * light_multiplier / weight;
                     auto ray = PackagedRay(
                         ray_data.position + 0.001 * results.normal,
-                        diffuse_slope,
-                        return_coefficient,
-                        ray_data.output,
-                        ray_data.generation + 1
+                        slope,
+                        data->max_generations-1
                     );
-                    stats.diffuses_cast++;
-                    process_ray(stats, ray);
+                    XYZ returned_light   = process_ray(stats, ray);
+                    raw_contribution    += returned_light;
+                    contribution        += final_return_coefficient * returned_light;
+                    average_coefficient += return_coefficient * light_multiplier;
                 }
+                light_contributions.push_back(contribution);
+                raw_light_contributions.push_back(raw_contribution);
+                average_light_coefficients.push_back(average_coefficient);
+                lights_contribution += contribution;
             }
-            else {
-                XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, reflection_slope, flipped_output);
-                if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
-                    return;
+#endif
+            float diffuse_V_increment = 1.0 / diffuse_Vslices;
+            float diffuse_R_increment = 1.0 / diffuse_Rslices;
+            float diffuse_V_position = 0;
+            float diffuse_R_position = 0;
+
+            for (int i = 0; i < diffuse_bounces; i++) {
+                if (i % diffuse_Rslices == 0 && i != 0) {
+                    diffuse_V_position+=diffuse_V_increment;
                 }
+                diffuse_R_position += diffuse_R_increment;
+                if (diffuse_R_position > 1) diffuse_R_position -= 1;
+                XYZ diffuse_slope = material.biased_diffuse_bounce(
+                    gen,
+                    normal_rot_m
+                    ,diffuse_V_position
+                    ,diffuse_V_position+diffuse_V_increment
+                    ,diffuse_R_position
+                    ,diffuse_R_position+diffuse_R_increment
+                );
+                //XYZ diffuse_slope = material.biased_diffuse_bounce(
+                //    normal_rot_m
+                //);
+                if (DRAW_BOUNCE_DIRECTION) {
+                    if (ray_data.generation == 1)
+                        return 1.0 / diffuse_bounces * (diffuse_slope / 2 + XYZ(0.5, 0.5, 0.5)) * 10;
+                    //continue;
+                }
+
+                //XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, diffuse_slope, flipped_output);
+                XYZ return_coefficient = material.diffuse_BRDF(XYZ::dot(normal, diffuse_slope));
+                if (XYZ::magnitude(return_coefficient) < 0.0001) continue;
+
+                return_coefficient = return_coefficient * diffuse_multiplier;
+
                 auto ray = PackagedRay(
-                    ray_data.position + NEAR_THRESHOLD * results.normal * 10,
-                    reflection_slope,
-                    return_coefficient,
-                    ray_data.output,
+                    ray_data.position + 0.001 * results.normal,
+                    diffuse_slope,
                     ray_data.generation + 1
                 );
-                process_ray(stats, ray);
-
-                stats.reflections_cast++;
+                ray.starting_index = results.parent_index;
+                stats.diffuses_cast++;
+                XYZ returned_light = process_ray(stats, ray);
+                diffuse_contribution+=return_coefficient*returned_light;
             }
+            XYZ total_contribution = diffuse_contribution + lights_contribution;
+            double diffuse_weight_post = std::max(0.1f,diffuse_contribution.magnitude() / total_contribution.magnitude());
+            aggregate += lights_contribution+diffuse_contribution;
+            
+
         }
+        else {
+            XYZ return_coefficient = material.fast_BRDF_co(normal, reflection_slope, flipped_output);
+            if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
+                return aggregate;
+            }
+            auto ray = PackagedRay(
+                ray_data.position + NEAR_THRESHOLD * results.normal * 10,
+                reflection_slope,
+                ray_data.generation + 1
+            );
+            ray.starting_index = results.parent_index;
+            aggregate+=return_coefficient*process_ray(stats, ray);
+
+            stats.reflections_cast++;
+        }
+        return aggregate;
     }
 };
 
@@ -4041,6 +3077,7 @@ public:
         iXY offset;
         vector<XYZ*> raws;
         atomic<int> pixels_done;
+        atomic<int> iterations_done{ 0 };
         int pixels_last;
         atomic<bool> done = false;
         block(int _block_size, int _block_x, int _block_y) {
@@ -4073,6 +3110,7 @@ public:
         int samples_per_pixel = 0;
 
         atomic<int> pixels_done{ 0 };
+        atomic<int> iterations_done{ 0 };
 
         Camera* camera = nullptr;
         RayEngine* RE = nullptr;
@@ -4099,6 +3137,8 @@ public:
     };
     atomic<bool> idle = true;
     atomic<bool> stop_thread = false;
+    atomic<bool> halt_ops = false;
+    atomic<int> mode = 0;
 
     thread worker;
     block* current;
@@ -4114,43 +3154,78 @@ public:
         process_info->child_rays_cast = 0;
         process_info->pixels_done = 0;
         srand(chrono::high_resolution_clock::now().time_since_epoch().count());
-        xe_seed[0] = rand();
-        xe_seed[1] = rand();
-        xe_seed[2] = rand();
-        xe_seed[3] = rand();
+        gen.seed(rand(), rand(), rand(), rand());
+        PackagedScene* PS = process_info->RE->data;
+        for (int i = 0; i < PS->monte_carlo_generations; i++) {
+            MIS_data.levels.push_back(MIS_weights(PS->emissive_tris));
+        }
         while (true) {
             if (stop_thread.load(std::memory_order_relaxed)) {
                 return;
             }
             if (!idle.load(std::memory_order_relaxed)) {
-                current = (blocks.back());
-                process_current();
-                current->done = true;
-                idle = true;
+                switch (mode.load(std::memory_order_relaxed)) {
+                case 0:
+                    current = (blocks.back());
+                    process_linearly();
+                    current->done = true;
+                    idle = true;
+                    break;
+                case 1:
+                    int block_id = 0;
+                    while (!halt_ops.load(std::memory_order_relaxed)) {
+                        current = blocks[block_id];
+                        process_iteratively();
+                        block_id++;
+                        block_id %= blocks.size();
+                    }
+                }
             }
             this_thread::sleep_for(chrono::milliseconds(1));
         }
     }
-    void process_current(){
+    void process_linearly(){
         for (int pixel_index = 0; pixel_index < process_info->pixels_per_block; pixel_index++) {
             iXY pixel_coordinate = get_coord(pixel_index);
             XYZ* output_link = get_output_link(pixel_index);
             for (int sub_index = 0; sub_index < process_info->samples_per_pixel; sub_index++) {
+                if (halt_ops.load(std::memory_order_relaxed)) {
+                    return;
+                };
                 XYZ ray_slope = slope_at(pixel_coordinate, sub_index);
                 auto ray = PackagedRay(
                     process_info->emit_coord,
                     ray_slope,
-                    process_info->starting_coefficient,
-                    output_link,
                     0
                 );
-                process_info->RE->process_ray(process_info->CD, ray);
+                (*output_link)+=process_info->starting_coefficient*process_info->RE->process_ray(process_info->CD, ray);
                 process_info->add_casts();
             }
             process_info->pixels_done++;
             current->pixels_done.store(pixel_index+1,std::memory_order_relaxed);
         }
         current->done.store(true,std::memory_order_relaxed);
+    }
+    void process_iteratively() {
+        int iterations_done = current->iterations_done.load(std::memory_order_relaxed);
+        for (int pixel_index = 0; pixel_index < process_info->pixels_per_block; pixel_index++) {
+            if (halt_ops.load(std::memory_order_relaxed)) {
+                return;
+            };
+            iXY pixel_coordinate = get_coord(pixel_index);
+            XYZ* output_link = get_output_link(pixel_index);
+            XYZ ray_slope = random_slope_at(pixel_coordinate);
+            auto ray = PackagedRay(
+                process_info->emit_coord,
+                ray_slope,
+                0
+            );
+            (*output_link) *= (double)iterations_done / (iterations_done + 1);
+            (*output_link) += 1.0 / (iterations_done+1) * process_info->RE->process_ray(process_info->CD, ray);
+            process_info->add_casts();
+        }
+        process_info->pixels_done++;
+        current->iterations_done.store(iterations_done+1, std::memory_order_relaxed);
     }
     iXY get_coord(int pixel_index) {
         int block_size = process_info->block_size;
@@ -4162,6 +3237,9 @@ public:
     }
     XYZ slope_at(iXY coord, int sub_index) {
         return process_info->camera->slope_at(coord.X, coord.Y, sub_index);
+    }
+    XYZ random_slope_at(iXY coord) {
+        return process_info->camera->random_slope_at(coord.X, coord.Y);
     }
 
 
@@ -4191,7 +3269,7 @@ public:
 
     SceneManager(Scene* _scene): scene(_scene){}
 
-    void render(int resolution_x, int resolution_y, int _subdivision_count = 1) {
+    void render(int resolution_x, int resolution_y, int _subdivision_count = 1, int mode = 0) {
         current_resolution_x = resolution_x;
         current_resolution_y = resolution_y;
 
@@ -4207,12 +3285,18 @@ public:
         prep();
         //enqueue_rays();
         GUI.create_window();
-        prepGUI();
+        if(mode==0) prepGUI();
         cout <<endl << "+RAYCASTING+" << endl;
         spawn_threads();
-        run_threaded_engine();
+        run_threaded_engine(mode);
         //_run_engine(true);
 
+    }
+    void spawn_host() {
+        host_loop();
+    }
+    void spawn_slave() {
+        slave_loop();
     }
     void hold_window() {
         GUI.hold_window();
@@ -4240,6 +3324,71 @@ private:
         cout << "Preprocessing done [" << chrono::duration_cast<chrono::milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
 
     }
+    vector<unsigned char> read_bytes(tcp::socket& socket) {
+        boost::asio::streambuf buf;
+        boost::asio::read_until(socket, buf, "\n");
+        vector<unsigned char> target(buf.size());
+        buffer_copy(boost::asio::buffer(target), buf.data());
+        return target;
+    }
+    void host_loop() {
+        boost::asio::io_context io_context;
+        tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 15413));
+        bool first = 1;
+        while (first) {
+            try {
+                first = 0;
+                cout << "awaiting connection" << endl;
+                tcp::socket socket(io_context);
+                acceptor.accept(socket);
+                Tri test = Tri(XYZ(1, 2, 3), XYZ(2, 3, 4), XYZ(3, 4, 5), new Material());
+                unsigned char* test_char = (unsigned char*)&test;
+                int buffer_size = sizeof(test);
+                auto buffer = boost::asio::buffer(test_char, buffer_size);
+
+                boost::asio::write(socket, buffer);
+
+                vector<unsigned char> message = read_bytes(socket);
+                Tri* test_out = (Tri*)message.data();
+
+                //cout <<"output: " << message << endl;
+            }
+            catch (std::exception const& ex) {
+                cout << ex.what() << endl;
+                exit(0);
+            }
+        }
+    }
+    void slave_loop() {
+        boost::asio::io_context io_context;
+        tcp::resolver resolver(io_context);
+        //tcp::resolver::results_type endpoints =
+        //resolver.resolve(argv[1], "daytime");
+        //bool first = 1;
+        //while (first) {
+        //    try {
+        //        first = 0;
+        //        cout << "awaiting connection" << endl;
+        //        tcp::socket socket(io_context);
+        //        acceptor.accept(socket);
+        //        Tri test = Tri(XYZ(1, 2, 3), XYZ(2, 3, 4), XYZ(3, 4, 5), new Material());
+        //        unsigned char* test_char = (unsigned char*)&test;
+        //        int buffer_size = sizeof(test);
+        //        auto buffer = boost::asio::buffer(test_char, buffer_size);
+        //
+        //        boost::asio::write(socket, buffer);
+        //
+        //        vector<unsigned char> message = read_bytes(socket);
+        //        Tri* test_out = (Tri*)message.data();
+        //
+        //        //cout <<"output: " << message << endl;
+        //    }
+        //    catch (std::exception const& ex) {
+        //        cout << ex.what() << endl;
+        //        exit(0);
+        //    }
+        //}
+    }
     void spawn_threads() {
         for (int i = 0; i < thread_count; i++) {
             RenderThread::processing_info* config = create_thread_config();
@@ -4248,17 +3397,9 @@ private:
             SetThreadPriority(thread->worker.native_handle(), 0);
         }
     }
-    void run_threaded_engine() {
-        time_point start_time = chrono::high_resolution_clock::now();
-        int remaining_threads = thread_count;
-        vector<RenderThread::block*> blocks;
-        vector<RenderThread::block*> job_stack;
-        for (int block_index_y = 0; block_index_y < y_increment; block_index_y++) {
-            for (int block_index_x = 0; block_index_x < x_increment; block_index_x++) {
-                job_stack.push_back(new RenderThread::block(block_size, block_index_x, block_index_y));
-                blocks.push_back(job_stack.back());
-            }
-        }
+    struct render_stats {
+        time_point start_time;
+        time_point now;
         time_point last_refresh = chrono::high_resolution_clock::now();
         long long parent_rays = 0;
         long long child_rays = 0;
@@ -4266,123 +3407,299 @@ private:
         long long child_rays_last = 0;
         double percent_last = 0;
         long long pixels_done = 0;
-        vector<long long> parent_rays_rate_history(120,0);
-        vector<long long> child_rays_rate_history(120,0);
-        vector<double> percent_rate_history(300,0);
-        while (true) {
-            parent_rays = 0;
-            child_rays = 0;
-            pixels_done = 0;
-            time_point now = chrono::high_resolution_clock::now();
-            for (int i = 0; i < thread_count; i++) {
-                RenderThread* render_thread = threads[i];
-                bool is_idle = render_thread->idle.load(std::memory_order_relaxed);
-                bool is_stopped = render_thread->stop_thread.load(std::memory_order_relaxed);
-
-                parent_rays += render_thread->process_info->parent_rays_cast;
-                child_rays += render_thread->process_info->child_rays_cast;
-                pixels_done += render_thread->process_info->pixels_done;
-                if (is_idle && !is_stopped) {
-                    if (job_stack.size() > 0) {
-                        RenderThread::block* job_block = job_stack.back();
-                        GUI.set_focus_position(i, job_block->offset.X, job_block->offset.Y);
-                        render_thread->blocks.push_back(job_block);
-                        job_stack.pop_back();
-                        render_thread->idle = false;
-                    }
-                    else {
-                        render_thread->stop_thread = true;
-                        remaining_threads--;
-                        GUI.set_focus_position(i, -10000, -10000);
-                    }
+        double percent_done = 0;
+        vector<long long> parent_rays_rate_history;
+        vector<long long> child_rays_rate_history;
+        vector<double>    percent_rate_history;
+        int remaining_threads;
+        render_stats(int history_size_rays, int history_size_rate) {
+            parent_rays_rate_history = vector<long long>(history_size_rays, 0);
+            child_rays_rate_history  = vector<long long>(history_size_rays, 0);
+            percent_rate_history     = vector<double>   (history_size_rate, 0);
+        }
+    };
+    struct pixel_strip {
+        int strip_start;
+        iXY block;
+        vector<XYZ> outputs;
+        pixel_strip(int start, iXY _block) {
+            strip_start = start;
+            block = _block;
+        }
+    };
+    void assign_iterative_groups(vector<RenderThread::block*>& job_stack) {
+        double jobs_per = (double)job_stack.size() / threads.size();
+        double amount_given = 0;
+        for (int i = 0; i < thread_count; i++) {
+            RenderThread* render_thread = threads[i];
+            render_thread->mode = 1;
+            double num_now = amount_given+jobs_per;
+            double to_do = num_now - ceil(amount_given);
+            amount_given = num_now;
+            if (i == thread_count - 1) num_now = ceil(num_now);
+            for (int j = 0; j < to_do; j++) {
+                int job_index = rand() % job_stack.size();
+                RenderThread::block* job = job_stack[job_index];
+                render_thread->blocks.push_back(job);
+                job_stack.erase(job_stack.begin()+job_index);
+            }
+        }
+    }
+    void start_threads() {
+        for (int i = 0; i < thread_count; i++) {
+            RenderThread* render_thread = threads[i];
+            render_thread->idle = false;
+        }
+    }
+    void halt_threads() {
+        for (int i = 0; i < thread_count; i++) {
+            RenderThread* render_thread = threads[i];
+            render_thread->halt_ops = true;
+        }
+    }
+    void unhalt_threads() {
+        for (int i = 0; i < thread_count; i++) {
+            RenderThread* render_thread = threads[i];
+            render_thread->halt_ops = false;
+        }
+    }
+    void reset_blocks(vector<RenderThread::block*>& blocks) {
+        for (int i = 0;i < blocks.size(); i++) {
+            RenderThread::block* block = blocks[i];
+            block->iterations_done = 0;
+            for (int j = 0; j < block->raws.size(); j++) {
+                *block->raws[j] = XYZ();
+            }
+        }
+    }
+    void gather_thread_stats(render_stats& rStat) {
+        rStat.parent_rays = 0;
+        rStat.child_rays = 0;
+        rStat.pixels_done = 0;
+        for (int i = 0; i < thread_count; i++) {
+            RenderThread* render_thread = threads[i];
+            rStat.parent_rays += render_thread->process_info->parent_rays_cast;
+            rStat.child_rays += render_thread->process_info->child_rays_cast;
+            rStat.pixels_done += render_thread->process_info->pixels_done;
+        }
+    }
+    void manage_threads(render_stats& rStat, vector<RenderThread::block*>& job_stack) {
+        time_point now = chrono::high_resolution_clock::now();
+        for (int i = 0; i < thread_count; i++) {
+            RenderThread* render_thread = threads[i];
+            bool is_idle = render_thread->idle.load(std::memory_order_relaxed);
+            bool is_stopped = render_thread->stop_thread.load(std::memory_order_relaxed);
+            if (is_idle && !is_stopped) {
+                if (job_stack.size() > 0) {
+                    RenderThread::block* job_block = job_stack.back();
+                    GUI.set_focus_position(i, job_block->offset.X, job_block->offset.Y);
+                    render_thread->blocks.push_back(job_block);
+                    job_stack.pop_back();
+                    render_thread->idle = false;
+                }
+                else {
+                    render_thread->stop_thread = true;
+                    rStat.remaining_threads--;
+                    GUI.set_focus_position(i, -10000, -10000);
                 }
             }
-            if (chrono::duration_cast<chrono::milliseconds>(now - last_refresh).count() > 16) {
-                for (int i = 0; i < blocks.size(); i++) {
-                    RenderThread::block* block = blocks[i];
-                    int pixels_done = block->pixels_done;
-                    int pixels_last = block->pixels_last;
-                    if (pixels_last < pixels_done) {
-                        iXY block_offset = block->offset;
-                        for (int pixel_index = pixels_last; pixel_index < pixels_done; pixel_index++) {
-                            iXY internal_offset = iXY(pixel_index % block_size, block_size - pixel_index / block_size - 1);
-                            iXY final_position = block_offset + internal_offset;
-                            (*raw_output[final_position.Y][final_position.X]) = *block->raws[pixel_index];
-                            XYZ color = ImageHandler::post_process_pixel(*raw_output[final_position.Y][final_position.X], 1, 1);
-                            GUI.commit_pixel(color, final_position.X, final_position.Y);
-                            
-                        }
-                    }
-                    block->pixels_last = pixels_done;
+        }
+    }
+    iXY get_pixel_offset(int index) {
+        return iXY(index % block_size, block_size - index / block_size - 1);
+    }
+    void get_block_updates(vector<RenderThread::block*>& blocks, vector<pixel_strip>& outputs) {
+        for (int i = 0; i < blocks.size(); i++) {
+            RenderThread::block* block = blocks[i];
+            int pixels_done = block->pixels_done;
+            int pixels_last = block->pixels_last;
+            if (pixels_last < pixels_done) {
+                iXY block_offset = block->offset;
+                pixel_strip p_strip(pixels_last, block_offset);
+                for (int pixel_index = pixels_last; pixel_index < pixels_done; pixel_index++) {
+                    iXY internal_offset = get_pixel_offset(pixel_index);
+                    iXY final_position = block_offset + internal_offset;
+                    (*raw_output[final_position.Y][final_position.X]) = *block->raws[pixel_index];
+                    XYZ color = ImageHandler::post_process_pixel(*raw_output[final_position.Y][final_position.X], 1, 1);
+                    p_strip.outputs.push_back(color);
+                    //GUI.commit_pixel(color, final_position.X, final_position.Y);
+
                 }
-                int seconds = chrono::duration_cast<chrono::seconds>(now - render_start).count();
-                int minutes = seconds / 60;
-                int hours = minutes / 60;
-                seconds %= 60;
-                minutes %= 60;
-                int micro_delta = chrono::duration_cast<chrono::microseconds>(now - last_refresh).count();
-                int milli_delta = micro_delta / 1000;
-                double second_ratio = ((double)1000000) / micro_delta;
-
-                long long total_pixels = current_resolution_x * current_resolution_y;
-                double percent = ((double)pixels_done) / total_pixels;
-                double percent_done = percent * 100;
-                double percent_rate = (percent_done - percent_last) * second_ratio;
-                percent_last = percent_done;
-
-
-                long long delta_parent = parent_rays - parent_rays_last;
-                long long delta_child = child_rays - child_rays_last;
-
-                long long parent_rate = delta_parent * second_ratio;
-                long long child_rate = delta_child * second_ratio;
-
-                parent_rays_last = parent_rays;
-                child_rays_last = child_rays;
-
-                percent_rate_history.push_back(percent_rate);
-                percent_rate_history.erase(percent_rate_history.begin());
-                parent_rays_rate_history.push_back(parent_rate);
-                parent_rays_rate_history.erase(parent_rays_rate_history.begin());
-                child_rays_rate_history.push_back(child_rate);
-                child_rays_rate_history.erase(child_rays_rate_history.begin());
-                
-                double percent_rate_average = 0;
-                long long parent_rate_average = 0;
-                long long child_rate_average = 0;
-
-                for (int i = 0; i < parent_rays_rate_history.size(); i++) {
-                    parent_rate_average += parent_rays_rate_history[i];
-                }
-                parent_rate_average /= parent_rays_rate_history.size();
-                for (int i = 0; i < child_rays_rate_history.size(); i++) {
-                    child_rate_average += child_rays_rate_history[i];
-                }
-                child_rate_average /= child_rays_rate_history.size();
-                for (int i = 0; i < percent_rate_history.size(); i++) {
-                    percent_rate_average += percent_rate_history[i];
-                }
-                percent_rate_average /= percent_rate_history.size();
-
-                parent_rays = 0;
-                child_rays = 0;
-                pixels_done = 0;
-
-                string primary_per_sec = intToEng(parent_rate_average);
-                string secondary_per_sec = intToEng(child_rate_average);
-                string total_per_sec = intToEng(parent_rate_average+child_rate_average);
-
-                
-
-                string format_string = "[%02i:%02i:%02i][%7ims] - ([%.5srays/s Primary][%.5srays/s Secondary])[%.5srays/s] - [%4.1f%% (+%4.3f/s)]\r";
-                printf(format_string.c_str(), hours, minutes, seconds, milli_delta, primary_per_sec.c_str(), secondary_per_sec.c_str(), total_per_sec.c_str(), percent_done, percent_rate_average);
-
-                GUI.commit_canvas();
-                GUI.handle_events();
-                last_refresh = chrono::high_resolution_clock::now();
+                outputs.push_back(p_strip);
             }
-            if (remaining_threads <= 0) {
-                break;
+            block->pixels_last = pixels_done;
+        }
+    }
+    void get_screen_update(vector<RenderThread::block*>& blocks) {
+        for (int i = 0;i < blocks.size(); i++) {
+            RenderThread::block* block = blocks[i];
+            iXY block_offset = block->offset;
+            for (int pixel_index = 0; pixel_index < block_size*block_size; pixel_index++) {
+                iXY internal_offset = get_pixel_offset(pixel_index);
+                iXY final_coord = block_offset + internal_offset;
+                (*raw_output[final_coord.Y][final_coord.X]) = *block->raws[pixel_index];
+                XYZ color = ImageHandler::post_process_pixel(*raw_output[final_coord.Y][final_coord.X], 1, 1);
+                GUI.commit_pixel(color, final_coord.X, final_coord.Y);
+            }
+        }
+    }
+    void pre_process_stats(render_stats& rStat) {
+        int seconds = chrono::duration_cast<chrono::seconds>(rStat.now - rStat.start_time).count();
+        int minutes = seconds / 60;
+        int hours = minutes / 60;
+        seconds %= 60;
+        minutes %= 60;
+        int micro_delta = chrono::duration_cast<chrono::microseconds>(rStat.now - rStat.last_refresh).count();
+        int milli_delta = micro_delta / 1000;
+        double second_ratio = ((double)1000000) / micro_delta;
+
+        long long total_pixels = current_resolution_x * current_resolution_y;
+        double percent = ((double)rStat.pixels_done) / total_pixels;
+        rStat.percent_done = percent * 100;
+        double percent_rate = (rStat.percent_done - rStat.percent_last) * second_ratio;
+
+
+        long long delta_parent = rStat.parent_rays - rStat.parent_rays_last;
+        long long delta_child = rStat.child_rays - rStat.child_rays_last;
+
+        long long parent_rate = delta_parent * second_ratio;
+        long long child_rate = delta_child * second_ratio;
+
+        rStat.percent_rate_history.push_back(percent_rate);
+        rStat.percent_rate_history.erase(rStat.percent_rate_history.begin());
+        rStat.parent_rays_rate_history.push_back(parent_rate);
+        rStat.parent_rays_rate_history.erase(rStat.parent_rays_rate_history.begin());
+        rStat.child_rays_rate_history.push_back(child_rate);
+        rStat.child_rays_rate_history.erase(rStat.child_rays_rate_history.begin());
+    }
+    void post_process_stats(render_stats& rStat) {
+        rStat.parent_rays_last = rStat.parent_rays;
+        rStat.child_rays_last = rStat.child_rays;
+        rStat.percent_last = rStat.percent_done;
+        rStat.last_refresh = chrono::high_resolution_clock::now();
+    }
+    void display_stats(render_stats& rStat) {
+        int seconds = chrono::duration_cast<chrono::seconds>(rStat.now - rStat.start_time).count();
+        int minutes = seconds / 60;
+        int hours = minutes / 60;
+        seconds %= 60;
+        minutes %= 60;
+        int micro_delta = chrono::duration_cast<chrono::microseconds>(rStat.now - rStat.last_refresh).count();
+        int milli_delta = micro_delta / 1000;
+        double second_ratio = ((double)1000000) / micro_delta;        
+
+        double percent_rate_average = 0;
+        long long parent_rate_average = 0;
+        long long child_rate_average = 0;
+
+        for (int i = 0; i < rStat.parent_rays_rate_history.size(); i++) {
+            parent_rate_average += rStat.parent_rays_rate_history[i];
+        }
+        parent_rate_average /= rStat.parent_rays_rate_history.size();
+        for (int i = 0; i < rStat.child_rays_rate_history.size(); i++) {
+            child_rate_average += rStat.child_rays_rate_history[i];
+        }
+        child_rate_average /= rStat.child_rays_rate_history.size();
+        for (int i = 0; i < rStat.percent_rate_history.size(); i++) {
+            percent_rate_average += rStat.percent_rate_history[i];
+        }
+        percent_rate_average /= rStat.percent_rate_history.size();
+
+        string primary_per_sec = intToEng(parent_rate_average);
+        string secondary_per_sec = intToEng(child_rate_average);
+        string total_per_sec = intToEng(parent_rate_average + child_rate_average);
+
+
+
+        string format_string = "[%02i:%02i:%02i][%7ims] - ([%.5srays/s Primary][%.5srays/s Secondary])[%.5srays/s] - [%4.1f%% (+%4.3f/s)]\r";
+        printf(format_string.c_str(), hours, minutes, seconds, milli_delta, primary_per_sec.c_str(), secondary_per_sec.c_str(), total_per_sec.c_str(), rStat.percent_done, percent_rate_average);
+
+    }
+    void process_strips(vector<pixel_strip> p_strips) {
+        for(int o_index = 0; o_index < p_strips.size(); o_index++){
+            pixel_strip& p_strip = p_strips[o_index];
+            iXY block_offset = p_strip.block;
+            int strip_start = p_strip.strip_start;
+            vector<XYZ>& outputs = p_strip.outputs;
+            for (int i = 0; i < outputs.size(); i++) {
+                XYZ color = outputs[i];
+                iXY internal_offset = get_pixel_offset(i + strip_start);
+                iXY final_coord = internal_offset + block_offset;
+                GUI.commit_pixel(color, final_coord.X, final_coord.Y);
+            }
+
+        }
+        p_strips.clear();
+    }
+    void refresh_display() {
+        GUI.commit_canvas();
+        GUI.handle_events();
+    }
+    void run_threaded_engine(int mode = 0) {
+        render_stats rStat(120, 300);
+        rStat.start_time = chrono::high_resolution_clock::now();
+        render_start = rStat.start_time;
+        rStat.remaining_threads = thread_count;
+        vector<RenderThread::block*> blocks;
+        vector<RenderThread::block*> job_stack;
+        vector<pixel_strip> update_strips;
+        for (int block_index_y = 0; block_index_y < y_increment; block_index_y++) {
+            for (int block_index_x = 0; block_index_x < x_increment; block_index_x++) {
+                job_stack.push_back(new RenderThread::block(block_size, block_index_x, block_index_y));
+                blocks.push_back(job_stack.back());
+            }
+        }
+        switch (mode) {
+        case 0:
+            while (true) {
+                rStat.now = chrono::high_resolution_clock::now();
+                manage_threads(rStat, job_stack);
+                if (chrono::duration_cast<chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
+                    gather_thread_stats(rStat);
+                    get_block_updates(blocks, update_strips);
+                    pre_process_stats(rStat);
+                    display_stats(rStat);
+                    post_process_stats(rStat);
+                    process_strips(update_strips);
+                    refresh_display();
+                }
+                if (rStat.remaining_threads <= 0) {
+                    break;
+                }
+            }
+            break;
+        case 1:
+            assign_iterative_groups(job_stack);
+            start_threads();
+            while (true) {
+                rStat.now = chrono::high_resolution_clock::now();
+                if (chrono::duration_cast<chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
+                    gather_thread_stats(rStat);
+                    get_screen_update(blocks);
+                    pre_process_stats(rStat);
+                    display_stats(rStat);
+                    post_process_stats(rStat);
+                    refresh_display();
+                }
+
+            }
+            break;
+        case 2:
+            assign_iterative_groups(job_stack);
+            start_threads();
+            while (true) {
+                rStat.now = chrono::high_resolution_clock::now();
+                if (chrono::duration_cast<chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 64) {
+                    halt_threads();
+                    gather_thread_stats(rStat);
+                    get_screen_update(blocks);
+                    pre_process_stats(rStat);
+                    display_stats(rStat);
+                    post_process_stats(rStat);
+                    refresh_display();
+                    reset_blocks(blocks);
+                    unhalt_threads();
+                }
             }
         }
         for (int i = 0; i < thread_count; i++) {
@@ -4404,7 +3721,7 @@ private:
         cout << endl;
 
         auto end_time = chrono::high_resolution_clock::now();
-        double millis = chrono::duration_cast<chrono::milliseconds>(end_time - start_time).count();
+        double millis = chrono::duration_cast<chrono::milliseconds>(end_time - rStat.start_time).count();
         cout << "Ray Casting Done [" << to_string(millis) << "ms]" << endl;
         //cout << "Approximate speed: " << intToEng((rays_cast / (millis / 1000.0))) << " rays/s";
     }
@@ -4412,167 +3729,6 @@ private:
         for (int i = 0; i < thread_count; i++) {
             GUI.add_focus();
         }
-    }
-    void _run_engine(bool show_debug) {
-        processing_info* process_info = create_process_config();
-        
-        for (int i_y = y_increment-1; i_y >= 0; i_y--) {
-            for (int i_x = 0; i_x < x_increment; i_x++) {
-                process_block_at(i_x,i_y,*process_info);
-            }
-        }
-        refresh_canvas();
-        cout << endl;
-
-        auto end_time = chrono::high_resolution_clock::now();
-        double millis = chrono::duration_cast<chrono::milliseconds>(end_time - process_info->start_time).count();
-        cout << "Ray Casting Done [" << to_string(millis) << "ms]" << endl;
-        cout << "Approximate speed: " << intToEng((process_info->rays_cast() / (millis / 1000.0))) << " rays/s";
-        processing_info;
-    };
-    struct processing_info {
-        processing_info() {}
-
-        time_point start_time = chrono::high_resolution_clock::now();
-        time_point last_update_time = chrono::high_resolution_clock::now();
-        
-        Casting_Diagnostics CD;
-        long long parent_rays_cast = 0;
-        long long child_rays_cast = 0;    
-        long long parent_rays_cast_last_update = 0;
-        long long child_rays_cast_last_update = 0;
-
-        long long debug_check_ray_interval = 16;
-        long long debug_check_ray_interval_max = 1024*1024;
-        long long debug_check_ray_interval_min = 1;
-        long long micro_delta_update_min = 5000;
-        long long micro_delta_update_target = 16000;
-
-        long long delta_period_millis = 200;
-
-        vector<vector<XYZ*>>* raws;
-        int block_size = 0;
-        int res_y = 0;
-        int res_x = 0;
-        int y_increment = 0;
-        int x_increment = 0;
-        int pixels_per_block = 0;
-        int samples_per_pixel = 0;
-
-        int pixels_done = 0;
-
-        Camera* camera; 
-
-        XYZ emit_coord;
-        XYZ starting_coefficient;
-
-
-        struct hist_struct {
-            double primary;
-            double secondary;
-            time_point time;
-        };
-
-        vector<hist_struct> hist;
-
-        void add_casts() {
-            parent_rays_cast++;
-            child_rays_cast += CD.rays_processed - 1;
-            CD.rays_processed = 0;
-        }
-        void update_hist() {
-            hist_struct entry;
-            entry.primary = parent_rays_cast;
-            entry.secondary = child_rays_cast;
-            entry.time = chrono::high_resolution_clock::now();
-            hist.push_back(entry);
-            while (true){
-                long long delta = chrono::duration_cast<chrono::milliseconds>(entry.time - hist.front().time).count();
-                if (delta < delta_period_millis || hist.size() <= 2) {
-                    break;
-                }
-                hist.erase(hist.begin());
-            }
-        }
-        void shift_last_update() {
-            parent_rays_cast_last_update = parent_rays_cast;
-            child_rays_cast_last_update = child_rays_cast;
-            last_update_time = chrono::high_resolution_clock::now();
-        }
-        long long delta_time(time_point now) {
-            return chrono::duration_cast<chrono::microseconds>(now - hist.front().time).count();
-        }
-        long long delta_parent() {
-            return parent_rays_cast - hist.front().primary;
-        }
-        long long delta_child() {
-            return child_rays_cast - hist.front().secondary;
-        }
-        long long delta_total() {
-            return delta_parent() + delta_child();
-        }
-        long long parent_rays_since_last() {
-            return parent_rays_cast - parent_rays_cast_last_update;
-        }
-        long long child_rays_since_last() {
-            return child_rays_cast - child_rays_cast_last_update;
-        }
-        long long rays_cast() {
-            return parent_rays_cast + child_rays_cast;
-        }
-        long long rays_cast_since_update() {
-            return parent_rays_since_last() + child_rays_since_last();
-        }
-        double percent() {
-            return ((double)pixels_done) / (res_x * res_y);
-        }
-        iXY get_coord_from_block(int block_xi, int block_yi, int i) {
-            iXY block_offset = iXY(block_xi * block_size, block_yi * block_size);
-            iXY inside_offset = iXY(i % block_size, block_size-i / block_size-1);
-            return block_offset + inside_offset;
-        }
-        XYZ* get_output_link(iXY coord) {
-            return (*raws)[coord.Y][coord.X];
-        }
-        XYZ slope_at(iXY coord, int sub_index) {
-            return camera->slope_at(coord.X, coord.Y, sub_index);
-        }
-        bool check_update() {
-            if (rays_cast_since_update() > debug_check_ray_interval) {
-                time_point now = chrono::high_resolution_clock::now();
-                long long micro_delta = chrono::duration_cast<chrono::microseconds>(now - last_update_time).count();
-                if (micro_delta > micro_delta_update_min) {
-                    debug_check_ray_interval *= micro_delta_update_target / ((double)micro_delta);
-                    debug_check_ray_interval = min(debug_check_ray_interval, debug_check_ray_interval_max);
-                    debug_check_ray_interval = max(debug_check_ray_interval, debug_check_ray_interval_min);
-                    return true;
-                }
-            }
-            return false;
-        }
-        ~processing_info() {
-            delete camera;
-        }
-    };
-    processing_info* create_process_config() {
-        processing_info* process_info = new processing_info();
-
-        process_info->emit_coord = scene->camera->position;
-        process_info->starting_coefficient = XYZ(1, 1, 1) / current_samples_per_pixel;
-                    
-        process_info->res_y = current_resolution_y;
-        process_info->res_x = current_resolution_x;
-        process_info->y_increment = y_increment;
-        process_info->x_increment = x_increment;
-        process_info->block_size = block_size;
-        process_info->samples_per_pixel = current_samples_per_pixel;
-        process_info->pixels_per_block = block_size * block_size;
-                    
-        process_info->camera = scene->camera->clone();
-        process_info->raws = &raw_output;
-                    
-
-        return process_info;
     }
     RenderThread::processing_info* create_thread_config() {
         RenderThread::processing_info* process_info = new RenderThread::processing_info();
@@ -4591,59 +3747,11 @@ private:
         process_info->pixels_per_block = block_size * block_size;
 
         process_info->camera = scene->camera;//camera->clone();
-        process_info->RE = &RE;
+        process_info->RE = new RayEngine(RE);
 
         return process_info;
     }
 
-    void process_block_at(int block_x, int block_y, processing_info& process_info) {
-        GUI.set_focus_position(0, block_x*block_size, block_y*block_size);
-        for (int pixel_index = 0; pixel_index < process_info.pixels_per_block; pixel_index++) {
-            iXY pixel_coordinate = process_info.get_coord_from_block(block_x, block_y, pixel_index);
-            XYZ* output_link = process_info.get_output_link(pixel_coordinate);
-            for (int sub_index = 0; sub_index < process_info.samples_per_pixel; sub_index++) {
-                XYZ ray_slope = process_info.slope_at(pixel_coordinate, sub_index);
-                auto ray = PackagedRay(
-                    process_info.emit_coord,
-                    ray_slope,
-                    process_info.starting_coefficient,
-                    output_link,
-                    0
-                );
-                RE.process_ray(process_info.CD, ray);
-                process_info.add_casts();
-            }
-            process_info.pixels_done++;
-            XYZ color = ImageHandler::post_process_pixel(*raw_output[pixel_coordinate.Y][pixel_coordinate.X], 1, 1);
-            GUI.commit_pixel(color, pixel_coordinate.X,pixel_coordinate.Y);
-            if (process_info.check_update()) {
-                process_info.update_hist();
-
-                auto now = chrono::high_resolution_clock::now();
-                int seconds = chrono::duration_cast<chrono::seconds>(now - render_start).count();
-                int minutes = seconds / 60;
-                int hours = minutes / 60;
-                seconds %= 60;
-                minutes %= 60;
-                int micro_delta = chrono::duration_cast<chrono::microseconds>(now - process_info.last_update_time).count();
-                int milli_delta = micro_delta / 1000;
-                double second_ratio = ((double)1000000) / process_info.delta_time(now);
-                   
-                string primary_per_sec = intToEng(second_ratio * process_info.delta_parent());
-                string secondary_per_sec = intToEng(second_ratio * process_info.delta_child());
-                string total_per_sec = intToEng(second_ratio * process_info.delta_total());
-
-                int percent_done = process_info.percent() * 100;
-
-                string format_string = "[%02i:%02i:%02i][%7ims] - ([%.5srays/s Primary][%.5srays/s Secondary])[%.5srays/s] - [%3i%%]\r";
-                printf(format_string.c_str(), hours, minutes, seconds, milli_delta, primary_per_sec.c_str(), secondary_per_sec.c_str(), total_per_sec.c_str(), percent_done);
-
-                GUI.commit_canvas();
-                GUI.handle_events();
-                process_info.shift_last_update();
-            }
-        }
-    }
     
     void refresh_canvas() {
         for (int y = 0; y < current_resolution_y; y++) {
@@ -5065,358 +4173,76 @@ public:
 };
 
 
-SceneManager* load_cornell_box() {
 
-   
-    decimal size = 100;
-
-    decimal scalar = size / 555;
-
-    Scene* scene = new Scene();
-    Lens* lens = new RectLens(1, 1);
-    Camera* camera = new Camera(XYZ(0, 0, -800*scalar), lens, XYZ(0, 0, -1));
-    scene->register_camera(camera);
-
-    decimal box_width = 555*scalar;
-    decimal wall_offset = box_width / 2;
-
-    Material* wall_left_mat = new Material();
-    wall_left_mat->color.set_static(XYZ(0, 0.5, 0.1));
-    wall_left_mat->roughness.set_static(1);
-    wall_left_mat->specular.set_static(0);
-    Plane* wall_left = new Plane(XYZ(1, 0, 0), XYZ(-wall_offset, 0, 0), wall_left_mat);
-
-    Material* wall_right_mat = new Material();
-    wall_right_mat->color.set_static(XYZ(0.7, 0, 0));
-    wall_right_mat->roughness.set_static(1);
-    wall_right_mat->specular.set_static(0);
-    Plane* wall_right = new Plane(XYZ(-1, 0, 0), XYZ(wall_offset, 0, 0), wall_right_mat);
-
-    Material* blank_wall_mat = new Material();
-    blank_wall_mat->color.set_static(XYZ(1, 1, 1));
-    blank_wall_mat->roughness.set_static(1);
-    blank_wall_mat->specular.set_static(0);
-    
-    Plane* top_wall = new Plane(XYZ(0, -1, 0), XYZ(0, wall_offset, 0), blank_wall_mat);
-    Plane* bottom_wall = new Plane(XYZ(0, 1, 0), XYZ(0, -wall_offset, 0), blank_wall_mat);
-    Plane* back_wall = new Plane(XYZ(0, 0, -1), XYZ(0, 0, wall_offset), blank_wall_mat);
-
-    Material* light_mat = new Material();
-    light_mat->color = XYZ(1, 1, 1);
-    light_mat->emissive.set_static(500*XYZ(1, 0.662, 0.341));
-    Mesh* square_mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\square.obj", light_mat);
-
-    Object* light_square = new Object(XYZ(0, 0, 0), box_width * 0.2 * XYZ(1, 1, 1));
-    light_square->addMesh(square_mesh);
-    light_square->applyTransformXYZ(0, wall_offset * 0.99, -2);
-    //light_square->rotateX(0.5);
-    //light_square->rotateY(0.5);
-    //light_square->rotateZ(0.5);
-
-    Material* box_mat = new Material();
-    box_mat->color = XYZ(1, 1, 1);
-    box_mat->roughness.set_static(0.5);
-    box_mat->specular.set_static(0.5);
-    Mesh* box_mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\cube.obj", box_mat);
-
-    Material* bust_mat = new Material();
-    bust_mat->color.set_static(XYZ(1, 1, 1));
-    bust_mat->roughness.set_static(1);
-    bust_mat->specular.set_static(0);
-    Mesh* bust_mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\head_rust.obj", bust_mat);
-    
-    Object* box_1 = new Object(XYZ(0, 0, 0), box_width * 0.3 * XYZ(1, 1, 1));
-    box_1->addMesh(box_mesh);
-    box_1->applyTransformXYZ(box_width*XYZ(0.25,-0.35,0.1));
-    box_1->rotateY(0.5);
-    
-
-    Object* box_2 = new Object(XYZ(0, 0, 0), box_width * 0.3 * XYZ(1, 2, 1));
-    box_2->addMesh(box_mesh);
-    box_2->applyTransformXYZ(box_width * XYZ(-0.1, 0.1, -0.1));
-
-    Object* bust = new Object(XYZ(0, 0, 0), box_width * 0.6 * XYZ(-1,1,1));
-    bust->addMesh(bust_mesh);
-    bust->applyTransformXYZ(box_width * XYZ(-0.2, -0.2, -0.1));
-
-    Object* room = new Object(XYZ(0, 0, 0), 1);
-    
-    room->addPlane(wall_right);
-    room->addPlane(wall_left);
-    room->addPlane(back_wall);
-    room->addPlane(top_wall);
-    room->addPlane(bottom_wall);
-    room->addChild(light_square);
-    room->addChild(box_1);
-    room->addChild(bust);
-
-    scene->register_object(room);
-    //scene->register_object(box_2);
-
-
-    SceneManager* SM = new SceneManager(scene);
-
-    return SM;
-}
-/*
-SceneManager* load_default_scene() {
-
-    Scene* scene = new Scene();
-
-    Lens* lens = new RectLens(0.5, 1);
-    Camera* camera = new Camera(XYZ(0, -0.3, -2), lens , XYZ(0,0,-2));
-
-    Material* sphere_mat = new Material();
-    sphere_mat->color.set_static(XYZ(0.2, 0.2, 1));//XYZ(0.24725, 0.1995, 0.0745);
-    sphere_mat->specular.set_static(0);
-    sphere_mat->metallic.set_static(1);
-    sphere_mat->roughness.set_static(0.2);
-    Sphere* my_sphere =new Sphere(1, XYZ(0, 0, 0), sphere_mat);
-
-    Material* sphere_2_mat = new Material();
-    sphere_2_mat->color.set_static(XYZ(1, 0.5, 0.5));//XYZ(0.24725, 0.1995, 0.0745);
-    sphere_2_mat->specular.set_static(0);
-    sphere_2_mat->metallic.set_static(0);
-    sphere_2_mat->roughness.set_static(1);
-    Sphere* my_sphere_2 = new Sphere(0.4, XYZ(-0.9, -0.6, -0.7), sphere_2_mat);
-    //Sphere* my_sphere_2 = new Sphere(0.4, XYZ(0, -0.6, 0.5), sphere_2_mat);
-
-    Material* tri_mat = new Material();
-    tri_mat->color.set_static(XYZ(1, 0.5, 1));//XYZ(0.24725, 0.1995, 0.0745);
-    tri_mat->specular.set_static(0.8);
-    tri_mat->metallic.set_static(0);
-    tri_mat->roughness.set_static(0.05);
-    Tri* my_tri = new Tri(XYZ(3, -0.7, -3), XYZ(0, 3, 0), XYZ(-3, -0.7, 3), tri_mat);
-
-    Material* light_mat = new Material();
-    light_mat->color.set_static(XYZ(1, 1, 1));
-    light_mat->emissive.set_static(200*XYZ(1,1,1));
-    //light_mat.emissive_color = XYZ(1, 0.662, 0.341);
-    Sphere* glow_sphere =new Sphere(1, XYZ(-3, 2, 0), light_mat);
-
-
-    Material* floor_mat = new Material();
-    floor_mat->color.set_static(XYZ(1, 1, 1));
-    floor_mat->roughness.set_static(0.25);
-    floor_mat->metallic.set_static(0);
-    floor_mat->specular.set_static(0.5);
-    Plane* floor =new Plane(XYZ(0, 1, 0), XYZ(0, -1, 0), floor_mat);
-
-    Material* mesh_mat = new Material();
-    string path = "C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\";
-    mesh_mat->color.set_static(XYZ(1, 0.2, 0.2));
-    //mesh_mat->color.set_static(XYZ(1, 1, 1));
-
-    //mesh_mat->color.set_texture(path+"color.bmp");
-    //mesh_mat->color = XYZ(1);
-    mesh_mat->roughness.set_static(0.2);
-    //mesh_mat->roughness.set_texture(path+"roughness.bmp");
-    mesh_mat->specular.set_static(0.5);
-    //mesh_mat->specular.set_texture(path+"specular.bmp");
-    mesh_mat->metallic.set_static(0);
-    //mesh_mat->normal.set_texture(path + "normal_8k.png");
-    // 
-    //Mesh* mesh = FileManager::loadTriFile("C:\\Users\\Charlie\\Documents\\RobotLab.tri", mesh_mat);
-    //Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\rusty\\head_rust.obj", mesh_mat);
-    Mesh* mesh = FileManager::loadObjFile("C:\\Users\\Charlie\\Documents\\models\\objs\\mike.obj", mesh_mat);
-    //Mesh* mesh = FileManager::loadMeshFile("C:\\Users\\Charlie\\source\\repos\\spatialPartitioning\\spatialPartitioning\\lowfumo.obj",mesh_mat);
-    Object* m_obj = new Object(XYZ(0,0,0),1*XYZ(1,1,1));
-    m_obj->addMesh(mesh);
-   // m_obj->applyTransformXYZ(1, 0, 2);
-    m_obj->applyTransformXYZ(0, 0, 2);
-    m_obj->rotateX(0);
-    //m_obj->rotateY(PI / 4);
-    m_obj->rotateZ(0);
-
-    //scene->register_sphere(my_sphere);
-    //scene->register_sphere(my_sphere_2);
-    //scene->register_tri(my_tri);
-    //scene->register_sphere(glow_sphere);
-    //scene->register_plane(floor);
-    scene->register_object(m_obj);
-
-    SceneManager* SM = new SceneManager(camera, scene);
-
-    return SM;
-}
-*/
-void benchmark() {
-    XYZ direction = XYZ(1, 1, 0);
-    direction.normalize();
-
-    Quat rot = Quat::makeRotation(XYZ(0, 1, 0), direction);
-    Matrix3x3 rot_m = Matrix3x3::quatToMatrix(rot);
-
-    //exit(0);
-
-    cout << endl;
-    for (int i = 0; i < 1024; i++) {
-        float f = (float) i / 1024.0 * 2 * PI;
-        double v = VecLib::Lcos(f);
-        cout << f << "," << v << endl;
-    }
-    exit(0);
-    int count = pow(10, 8);
-    XYZ out = XYZ();
-    if (true) {
-        int num = 512;
-        float t_c_e = 0;
-        float t_s_e = 0;
-        float t_c_e_a = 0;
-        float t_s_e_a = 0;
-        for (int i = 0; i < num; i++) {
-            float f = (float)i / num;
-            float c_error = VecLib::Lcos(f) - cos(f);
-            float s_error = VecLib::Lsin(f) - sin(f);
-            t_c_e += c_error;
-            t_s_e += s_error;
-            t_c_e_a += abs(c_error);
-            t_s_e_a += abs(s_error);
-        }
-        cout << "cosine: total error: " << t_c_e << ", total absolute error: " << t_c_e_a << ", average error: " << t_c_e / num << ", average absolute error: " << t_c_e_a / num << endl;
-        cout << "sine: total error: " << t_s_e << ", total absolute error: " << t_s_e_a << ", average error: " << t_s_e / num << ", average absolute error: " << t_s_e_a / num << endl;
-        cout << endl;
-    }
-    auto start_1 = chrono::high_resolution_clock::now();
-    for (int i = 0; i < count;i++) {
-        out += VecLib::generate_biased_random_hemi();
-    }
-    auto end_1 = chrono::high_resolution_clock::now();
-    auto start_2 = chrono::high_resolution_clock::now();
-    decimal f = cos(0.1);
-    for (int i = 0; i < count;i++) {
-        out+= VecLib::lookup_biased_random_hemi();
-    }
-    auto end_2 = chrono::high_resolution_clock::now();
-    //auto start_3 = chrono::high_resolution_clock::now();
-    //for (int i = 0; i < count * 2;i += 2) {
-    //    //out+= XYZ::test_slope(XYZ::random(100), XYZ::random(100));
-    //}
-    //auto end_3 = chrono::high_resolution_clock::now();
-    //auto start_4 = chrono::high_resolution_clock::now();
-    //for (int i = 0; i < count * 2;i += 2) {
-    //    //out+= XYZ::slope(XYZ::random(100), XYZ::random(100));
-    //}
-    //auto end_4 = chrono::high_resolution_clock::now();
-    //auto start_5 = chrono::high_resolution_clock::now();
-    //for (int i = 0; i < count;i++) {
-    //    //volatile XYZ k = VecLib::lookup_random_cone(0.1);
-    //}
-    //auto end_5 = chrono::high_resolution_clock::now();
-    cout << out << endl;
-    cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_1 - start_1).count() * 1000) << "/s" << endl;
-    cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_2 - start_2).count() * 1000) << "/s" << endl;
-    //cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_3 - start_3).count() * 1000) << "/s" << endl;
-    //cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_4 - start_4).count() * 1000) << "/s" << endl;
-    //cout << intToEng((double)count / chrono::duration_cast<chrono::milliseconds>(end_5 - start_5).count() * 1000) << "/s" << endl;
-
-    //exit(0);
-    /**
-    for (int i = 0; i < 0; i++) {
-        //XYZ p = VecLib::random_cone(0.1);
-        XYZ p = VecLib::aligned_random(0.1, rot);
-        cout << "A::" << p.X << "::" << p.Y << "::" << p.Z << "::0::2::A::1::0::0::0::0;" << endl;
-    }
-    */
-    //exit(0);
-}
-
-void post_bench() {
-    /*auto l = scene_manager->RE.test_bvh->flatten(-1);
-    cout << l.first->size() << endl;
-    string out_s = "join(";
-    int max = min((int)l.first->size(), 1000);
-    for (int i = 0; i < max;i++) {
-        BVH* b = l.first->at(i);
-        //Tri* t = l.second->at(i);
-        //XYZ M = t->AABB_max;
-        //XYZ m = t->AABB_min;
-        XYZ M = b->max;
-        XYZ m = b->min;
-        string piece = "B(";
-        piece += M.to_string();
-        piece += ", ";
-        piece += m.to_string();
-        piece += ")";
-        if (i < max - 1) {
-            piece += ",";
-        }
-        piece += " ";
-        out_s += piece;
-    }
-    //cout << out_s << ")" << flush;
-    out_s = "triangle(";
-    string v1 = "[";
-    string v2 = "[";
-    string v3 = "[";
-    max = min((int)l.second->size(), 2000);
-    for (int i = 0; i < max;i++) {
-        if (i > 0) {
-            v1 += ",";
-            v2 += ",";
-            v3 += ",";
-        }
-        Tri* t = l.second->at(i);
-        v1 += t->p1.to_string();
-        v2 += t->p2.to_string();
-        v3 += t->p3.to_string();
-    }
-    v1 += "]";
-    v2 += "]";
-    v3 += "]";
-    out_s += v1 + ", " + v2 + ", " + v3 + ")";
-    //cout << out_s << flush;
-    //exit(0);
-    //scene_manager->render(1920 / 10, 1080 / 10, 1);
-    */
-}
-
-void test_functions() {
-    int test_points = 1000;
-    int per_point = 10000;
-    for (int i = 0; i < test_points; i++) {
-        cout << VecLib::biased_random_hemi().to_string() << ",";
-    }
-    for (int i = 0; i < test_points; i++) {
-        XYZ pointing = XYZ::normalize(XYZ::random());
-        Quat rot = Quat::makeRotation(XYZ(0, 1, 0), pointing);
-        Matrix3x3 rot_m = Matrix3x3::quatToMatrix(rot);
-        XYZ average = XYZ();
-        for (int k = 0; k < per_point; k++) {
-            XYZ genned = VecLib::biased_random_hemi();
-            XYZ final_point = Matrix3x3::applyRotationMatrix(genned, rot_m);
-            average += final_point;
-        }
-        cout << pointing.to_string() << " vs " << XYZ::normalize((average / per_point)).to_string() << endl;
-        
-    }
-}
-int main()
+int main(int argc, char* argv[])
 {
     srand(0);
 
-    xe_seed[0] = rand();
-    xe_seed[1] = rand();
-    xe_seed[2] = rand();
-    xe_seed[3] = rand();
+    gen.seed(rand(), rand(), rand(), rand());
 
-    VecLib::prep();
-    
-    //test_functions();
-    //benchmark();
-    cout << ImageHandler::config->getDescription() << endl;
-    cout << ImageHandler::config->getName() << endl; 
+    VecLib::prep(gen);
+    map<string, string> arg_bindings;
+    if (argc > 1) {
+        string prev = argv[1];
+        for (int i = 2; i < argc; i++) {
+            arg_bindings[prev] = argv[i];
+            prev = argv[i];
+        }
+        arg_bindings[prev] = "";
+    }
+    int mode = 0;
+    string fpath = "C:\\Users\\Charlie\\Documents\\models\\Scenes\\cornell.glb";
+    string host_ip = "127.0.0.1";
+    string host_port = "15413";
+    string matcher_ip = "";
+    string matcher_port = "15413";
+    int resolution_x = 1080 / 4;
+    int resolution_y = 1080 / 4;
+    int subdivisions = 1;
+    if (arg_bindings.count("-f")) fpath = arg_bindings["-f"];
+    if (arg_bindings.count("-H")) mode = 1;
+    if (arg_bindings.count("-S")) mode = 2;
+    if (arg_bindings.count("-hIP")) host_ip = arg_bindings["-hIP"];
+    if (arg_bindings.count("-hPort")) host_port = arg_bindings["-hPort"];
+    if (arg_bindings.count("-mIP")) matcher_ip = arg_bindings["-mIP"];
+    if (arg_bindings.count("-mPort")) matcher_port = arg_bindings["-mPort"];
+    try {
+        if (arg_bindings.count("-rX")) resolution_x = stoi(arg_bindings["-rX"]);
+        if (arg_bindings.count("-rY")) resolution_y = stoi(arg_bindings["-rY"]);
+        if (arg_bindings.count("-sd")) subdivisions = stoi(arg_bindings["-sd"]);
+    }
+    catch (exception e) {
+        cout << "invalid numerical parameter" << endl;
+    }
     //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
     
     //GUI->hold_window();
     //SceneManager* scene_manager = load_cornell_box();
-    SceneManager* scene_manager = FileManager::loadGLTFFile("C:\\Users\\Charlie\\Documents\\models\\Scenes\\cornell.glb");
-    scene_manager->render(1080/4, 1080/4, 10);
+
+    SceneManager* scene_manager;
+
+
+    switch (mode) {
+    case 0:
+       scene_manager = FileManager::loadGLTFFile(fpath);
+       scene_manager->render(resolution_x, resolution_y, subdivisions, 1);
+       scene_manager->hold_window();
+       break;
+    case 1:
+        scene_manager = FileManager::loadGLTFFile(fpath);
+        scene_manager->spawn_host();
+        scene_manager->hold_window();
+        break;
+    //case 2:
+        //scene_manager->spawn_slave();
+    }
+
     
-    cout << endl << "writing out raw......." << flush;
-    FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
-    cout << "done" << endl;
-    scene_manager->hold_window();
+    //scene_manager->render(1080/4, 1080/4, 2);
+    
+    //cout << endl << "writing out raw......." << flush;
+    //FileManager::writeRawFile(&scene_manager->raw_output, "outputs.raw");
+    //cout << "done" << endl;
 
 }
 

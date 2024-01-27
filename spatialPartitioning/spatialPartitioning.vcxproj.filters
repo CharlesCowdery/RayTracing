@@ -18,6 +18,21 @@
     <ClCompile Include="spatialPartitioning.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="XYZ.ixx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="XorRandom.ixx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Materials.ixx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Matrix.ixx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="VecLib.ixx">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\openal32.dll">
@@ -55,17 +70,6 @@
     </None>
   </ItemGroup>
   <ItemGroup>
-    <Text Include="Backup1.txt">
-      <Filter>Source Files</Filter>
-    </Text>
-    <Text Include="backup2.txt">
-      <Filter>Source Files</Filter>
-    </Text>
-    <Text Include="V1.txt">
-      <Filter>Source Files</Filter>
-    </Text>
-  </ItemGroup>
-  <ItemGroup>
     <ClInclude Include="stb_image.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -76,6 +80,12 @@
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="json.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\Downloads\simd_bitonic.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="common.h">
       <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
