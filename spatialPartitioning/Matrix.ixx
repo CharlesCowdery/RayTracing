@@ -29,6 +29,17 @@ public:
         data[7] = h;
         data[8] = i;
     }
+    Matrix3x3(XYZ vec1,XYZ vec2,XYZ vec3) {
+        data[0] = vec1.X;
+        data[1] = vec1.Y;
+        data[2] = vec1.Z;
+        data[3] = vec2.X;
+        data[4] = vec2.Y;
+        data[5] = vec2.Z;
+        data[6] = vec3.X;
+        data[7] = vec3.Y;
+        data[8] = vec3.Z;
+    }
     static Matrix3x3 quatToMatrix(Quat q) {
         Matrix3x3 m;
         float s = q.magnitude();
@@ -49,6 +60,15 @@ public:
             point.X * m.data[3] + point.Y * m.data[4] + point.Z * m.data[5],
             point.X * m.data[6] + point.Y * m.data[7] + point.Z * m.data[8]
         );
+    }
+    XYZ r1() {
+        return XYZ(data[0], data[1], data[2]);
+    }
+    XYZ r2() {
+        return XYZ(data[3], data[4], data[5]);
+    }
+    XYZ r3() {
+        return XYZ(data[6], data[7], data[8]);
     }
     //static Matrix3x3 createMatrix(const XYZ& start, const XYZ& end) {
     //    XYZ v = XYZ::cross(start, end);

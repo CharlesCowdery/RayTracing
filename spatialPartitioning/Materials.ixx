@@ -2,6 +2,8 @@
 #include <string>
 #include <vector>;
 #include <math.h>;
+#include <assert.h>
+#include <malloc.h>
 import XYZ;
 import Matrix;
 import VecLib;
@@ -12,112 +14,132 @@ export module Materials;
 
 using namespace std;
 
-export class XYZTexture {
+export template <typename T>
+class Texture {
 public:
     int resolution_x;
     int resolution_y;
-    double U_scalar;
-    double V_scalar;
-    vector<vector<XYZ>> data;
-    //XYZTexture(vector<vector<XYZ>>* data_ptr) {
-    //    data = *data_ptr;
-    //}
-    //XYZTexture(string file_name) {
-    //    const string file_n = file_name;
-    //    int width, height, original_no_channels;
-    //    int desired_no_channels = 3;
-    //    unsigned char* img = stbi_load(file_n.c_str(), &width, &height, &original_no_channels, desired_no_channels);
-    //    string output = padString("Attempting to fetch texture at path: " + file_n + "", ".", 100);
-    //    cout << output;
-    //    if (img == NULL) {
-    //        cout << "!Failed!";
-    //        throw invalid_argument("");
-    //    }
-    //    cout << "[Done]" << endl;
-    //    string process_string = padString(
-    //        "    ->Loading: [" + to_string(width) +
-    //        "px : " + to_string(height) +
-    //        "px] Channels: [original: " + to_string(original_no_channels) +
-    //        " ; loaded: " + to_string(desired_no_channels) + "]"
-    //        , ".", 100);
-    //    cout << process_string << flush;
-    //
-    //    resolution_x = width;
-    //    resolution_y = height;
-    //    for (int y = 0; y < resolution_y; y++) {
-    //        data.push_back(vector<XYZ>());
-    //        for (int x = 0; x < resolution_x; x++) {
-    //            int position = y * resolution_x * 3 + x * 3;
-    //            float r = (float)img[position];
-    //            float g = (float)img[position + 1];
-    //            float b = (float)img[position + 2];
-    //            XYZ color = XYZ(r / 256.0, g / 256.0, b / 256.0);
-    //            color = (color - XYZ(0.5)) * 2;
-    //            data.back().push_back(color);
-    //            ;
-    //        }
-    //    }
-    //    delete[] img;
-    //    U_scalar = resolution_x;
-    //    V_scalar = resolution_y;
-    //    cout << "[Done]" << endl;
-    //}
+    double U_multiplier;
+    double V_multiplier;
+    XY scale = XY(1,1);
+    XY offset = XY(0,0);
+    T* data;//was originally a vector, but the red tape surrounding vector made texture loading very slow in debug mode
+    Texture() {
+        data = nullptr;
+    }
+    Texture(T* data_ptr) {
+        data = data_ptr;
+    }
+    Texture(unsigned char* img, int width, int height, int components, T (*converter)(float,float,float)) {
+        allocate(width, height);
+        int position = 0;
+        int data_pos = 0;
+        for (int y = 0; y < resolution_y; y++) {
+            for (int x = 0; x < resolution_x; x++) {
+                position+=components;
+                float r = ((float)img[position + 0])/255.0;
+                float g = ((float)img[position + 1]) / 255.0;
+                float b = ((float)img[position + 2]) / 255.0;
+                data[data_pos] = (converter(r, g, b));
+                data_pos++;
+            }
+        }
+    }
+    ~Texture() {
+        if (data != nullptr) {
+            free(data);
+        }
+    }
+    Texture<T>* clone_shallow() {
+        Texture<T>* tex = new Texture<T>();
+        tex->resolution_x = resolution_x;
+        tex->resolution_y = resolution_y;
+        tex->set_transform(scale, offset);
+        tex->data = data;
+        return tex;
+    }
+    void set_transform(XY _scale, XY _offset) {
+        scale = _scale;
+        offset = _offset;
+    }
+    int size() {
+        return resolution_x * resolution_y;
+    }
+    void allocate(int rx, int ry) {
+        resolution_x = rx;
+        resolution_y = ry;
+        data = (T*)_aligned_malloc(sizeof(T) * ry * rx,64);
+    }
+    Texture<float>* export_channel(int channel) {
+        Texture<float>* out = new Texture<float>();
+        out->allocate(resolution_x, resolution_y);
+        out->set_transform(scale, offset);
+        int pos = 0;
+        for (int y = 0; y < resolution_y; y++) {
+            for (int x = 0; x < resolution_x; x++) {
+                out->data[pos] = lookup(x, y)[channel];
+                pos++;
+            }
+        }
+        return out;
+    }
     void prep() {
-        U_scalar = resolution_x;
-        V_scalar = resolution_y;
+        U_multiplier = resolution_x*scale.X;
+        V_multiplier = resolution_y*scale.Y;
     }
-    XYZ lookup(int x, int y) {
-        return data[y][x];
+    T lookup(int x, int y) {
+        x = x % resolution_x;
+        y = y % resolution_y;
+        if (x < 0) x = resolution_x + x;
+        if (y < 0) y = resolution_y + y;
+        return data[y*resolution_x+x];
     }
-    XYZ getUV(double U, double V) {
+    T getUV(double U, double V) {
         V = 1 - V;
-        int pos_x = floor(U_scalar * U);
-        int pos_y = floor(V_scalar * V);
+        int pos_x = (int)floor(U_multiplier * U)%resolution_x;
+        int pos_y = (int)floor(V_multiplier * V)%resolution_y;
         return lookup(pos_x, pos_y);
     }
-    XYZ getPixelLinear(double U, double V) {
-        double x_1 = U_scalar * U - 0.5 * U_scalar;
-        double x_2 = U_scalar * U + 0.5 * U_scalar;
-        double y_1 = V_scalar * V - 0.5 * V_scalar;
-        double y_2 = V_scalar * V + 0.5 * V_scalar;
+    T getPixelLinear(double U, double V) {
+        double x_1 = U_multiplier * U - 0.5 * U_multiplier;
+        double x_2 = U_multiplier * U + 0.5 * U_multiplier;
+        double y_1 = V_multiplier * V - 0.5 * V_multiplier;
+        double y_2 = V_multiplier * V + 0.5 * V_multiplier;
         int pos_x_1 = std::max(0, std::min(resolution_x - 1, (int)floor(x_1)));
         int pos_x_2 = std::max(0, std::min(resolution_x - 1, (int)floor(x_2)));
         int pos_y_1 = std::max(0, std::min(resolution_y - 1, (int)floor(y_1)));
         int pos_y_2 = std::max(0, std::min(resolution_y - 1, (int)floor(y_2)));
-        XYZ c1 = lookup(pos_x_1, pos_y_1);
-        XYZ c2 = lookup(pos_x_2, pos_y_1);
-        XYZ c3 = lookup(pos_x_1, pos_y_2);
-        XYZ c4 = lookup(pos_x_2, pos_y_2);
+        T c1 = lookup(pos_x_1, pos_y_1);
+        T c2 = lookup(pos_x_2, pos_y_1);
+        T c3 = lookup(pos_x_1, pos_y_2);
+        T c4 = lookup(pos_x_2, pos_y_2);
         double f1 = pos_x_2 - x_1;
         double f2 = x_2 - pos_x_2;
         double f3 = pos_y_2 - y_1;
         double f4 = y_2 - pos_y_2;
-        XYZ c_m1 = f1 * c1 + f2 * c2;
-        XYZ c_m2 = f1 * c3 + f2 * c4;
+        T c_m1 = f1 * c1 + f2 * c2;
+        T c_m2 = f1 * c3 + f2 * c4;
         return f3 * c_m1 + f4 * c_m2;
     }
 };
 
-export class Parameter {
+export template <typename T>
+class Parameter {
 public:
-    XYZ static_value = 0;
-    XYZTexture* texture = nullptr;
-    Parameter(float X, float Y, float Z) : static_value(XYZ(X, Y, Z)) {}
-    Parameter(XYZ value) : static_value(value) {}
-    Parameter(XYZTexture* texture_ptr) : texture(texture_ptr) {}
+    T static_value = 0;
+    Texture<T>* texture = nullptr;
+    Parameter(T value) : static_value(value) {}
+    Parameter(Texture<T>* texture_ptr) : texture(texture_ptr) {}
     //Parameter(string file_name) : texture(new XYZTexture(file_name)) {}
-    void set_static(double value) {
-        static_value.X = value;
-    }
-    void set_static(XYZ value) {
-        static_value = XYZ(value);
+    void set_static(T value) {
+        static_value = value;
     }
     void prep() {
         if (texture != nullptr) {
             texture->prep();
         }
     }
-    void set_texture(XYZTexture* texture_ptr, bool free = false) {
+    void set_texture(Texture<T>* texture_ptr, bool free = false) {
         if (texture != nullptr) {
             if (free) {
                 delete texture;
@@ -128,20 +150,12 @@ public:
     void set_texture(string file_name, bool free = false) {
         //set_texture(new XYZTexture(file_name), free);
     }
-    XYZ getXYZ(double U, double V) {
+    T getValue(double U = 0, double V = 0) {
         if (texture != nullptr) {
             return texture->getUV(U, V);
         }
         else {
             return static_value;
-        }
-    }
-    double getSingle(double U, double V) {
-        if (texture != nullptr) {
-            return texture->getUV(U, V).X;
-        }
-        else {
-            return static_value.X;
         }
     }
 };
@@ -167,7 +181,7 @@ public:
 
     MaterialSample(XYZ _color, float _roughness, float _metallic, float _specular, XYZ _emissive, XYZ _normal) {
         color = _color;
-        roughness = _roughness;
+        roughness = _roughness * 0.7 + 0.3;
         metallic = _metallic;
         specular = _specular;
         emissive = _emissive;
@@ -200,7 +214,7 @@ public:
         return fast_fresnel(dot_NI);
     }
     XYZ get_diffuse_factor_v2(float dot_NI) const {
-        return XYZ(1) - fast_fresnel(dot_NI);
+        return XYZ(1) - get_specular_factor_v2(dot_NI);
     }
     XYZ get_specular_color() const {
         return XYZ::linear_mix(metallic, specular * XYZ(1, 1, 1), color);
@@ -215,7 +229,7 @@ public:
     }
     XYZ fast_fresnel(float dot_NI) const {
         float g = 1 - dot_NI;
-        return I_spec * (g * g * g * g * g);
+        return spec_color+(1-spec_color) * (g * g * g * g * g);
     }
     float get_normal_distribution_beta(const XYZ& normal, const XYZ& half_vector) const {
         float a = roughness;
@@ -317,7 +331,12 @@ public:
         return Matrix3x3::aligned_unbiased_hemi(G, diffuse_rotation);
     }
     XYZ reflective_bounce(XorGen& G, const Matrix3x3& reflection_rotation) const {
-        return Matrix3x3::aligned_random(G, diff_spread, reflection_rotation);
+        XYZ dir = VecLib::generate_unbiased_random_hemi(G);
+        double r_v = (roughness - 0.3) / 0.7;
+        float dist = 1 / (pow(r_v+1,4) - 1)-0.05;
+        dir.Y += dist;
+        XYZ slope = XYZ::normalize(dir);
+        return Matrix3x3::applyRotationMatrix(slope, reflection_rotation);
     }
 
     XYZ calculate_emissions() const {
@@ -327,13 +346,18 @@ public:
 
 export class Material {
 public:
-    Parameter color = Parameter(0);
-    Parameter roughness = Parameter(0.1);
-    Parameter metallic = Parameter(0);
-    Parameter specular = Parameter(0);
-    Parameter emissive = Parameter(0);
-    Parameter normal = Parameter(0);
+    Parameter<XYZ>   color        = Parameter<XYZ>(0);
+    Parameter<float> roughness    = Parameter<float>(0.1);
+    Parameter<float> metallic     = Parameter<float>(0.);
+    Parameter<float> specular     = Parameter<float>(0.);
+    Parameter<XYZ>   RMS          = Parameter<XYZ>(XYZ(0.1,0,0));
+    Parameter<XYZ>   emissive     = Parameter<XYZ>(0);
+    Parameter<XYZ>   normal       = Parameter<XYZ>(0);
+    Parameter<float> transmission = Parameter<float>(0.);
+    Parameter<float> IOR          = Parameter<float>(1);
+    Parameter<float> alpha        = Parameter<float>(1);
 
+    int UV_map_index = 0;
     bool use_normals = false;
 
     Material() {}
@@ -348,12 +372,12 @@ public:
     }
     MaterialSample sample_UV(float U, float V) {
         return MaterialSample(
-            color.getXYZ(U, V),
-            roughness.getSingle(U, V),
-            metallic.getSingle(U, V),
-            specular.getSingle(U, V),
-            emissive.getXYZ(U, V),
-            normal.getXYZ(U, V)
+            color.getValue(U, V),
+            roughness.getValue(U, V),
+            metallic.getValue(U, V),
+            specular.getValue(U, V),
+            emissive.getValue(U, V),
+            normal.getValue(U, V)
         );
     }
 };

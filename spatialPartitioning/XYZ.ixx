@@ -31,6 +31,9 @@ export struct XY {
     XY operator*(const float& scalar) const {
         return XY(X * scalar, Y * scalar);
     }
+    XY operator*(const XY& other) const {
+        return XY(X * other.X, Y * other.Y);
+    }
     bool operator==(const XY& other) const
     {
         if (X == other.X && Y == other.Y) return true;
@@ -47,7 +50,16 @@ export struct XY {
         }
     };
     typedef unordered_set<XY, XY::HashFunction> set;
+    string to_string() const {
+        return "("+std::to_string(X) + "," + std::to_string(Y)+")";
+    }
 };
+
+export ostream& operator<<(ostream& stream, const XY& vec2) {
+    stream << vec2.to_string();
+    return stream;
+}
+
 XY operator*(const float& self, const XY& coord) {
     return coord * self;
 }
@@ -101,6 +113,7 @@ public:
         if (n == 0) return X;
         if (n == 1) return Y;
         if (n == 2) return Z;
+        //return *((float*)this + n);
     }
     float& operator[](const int n) {
         if (n == 0) return X;
@@ -310,7 +323,13 @@ public:
     }
    
     string to_string() {
-        return "(" + std::to_string(X) + ", " + std::to_string(Y) + ", " + std::to_string(Z) + ")";
+        string xstr = std::to_string(X);
+        xstr = ((X > 0) ? " " : "") + xstr;
+        string ystr = std::to_string(Y);
+        ystr = ((Y > 0) ? " " : "") + ystr;
+        string zstr = std::to_string(Z);
+        zstr = ((Z > 0) ? " " : "") + zstr;
+        return "(" + xstr + "," + ystr + "," + zstr + ")";
     }
     XYZ operator/(const XYZ& other) const {
         return XYZ(X / other.X, Y / other.Y, Z / other.Z);
@@ -410,6 +429,9 @@ public:
             return (point1->Z < point2->Z);
         }
     };
+    struct X_t;
+    struct Y_t;
+    struct Z_t;
 };
 
 export XYZ operator*(const float& self, const XYZ& point) {
@@ -425,6 +447,24 @@ export XYZ operator/(const float& self, const XYZ& point) {
 export std::ostream& operator<<(std::ostream& os, XYZ& m) {
     return os << m.to_string();
 }
+
+export struct XYZ::X_t : XYZ {
+    float v() {
+        return X;
+    }
+};
+
+export struct XYZ::Y_t : XYZ {
+    float v() {
+        return Y;
+    }
+};
+
+export struct XYZ::Z_t : XYZ {
+    float v() {
+        return Z;
+    }
+};
 
 export struct m256_vec3 {
     __m256 X;
@@ -491,7 +531,7 @@ export struct Quat : public XYZ {
     static float dot(const Quat& q1, const Quat& q2) {
         return q1.X * q2.X + q1.Y * q2.Y + q1.Z * q2.Z + q1.W * q2.W;
     }
-    static Quat multiply(const Quat& q1, const Quat& q2) {
+    static Quat multiply(const Quat& q2, const Quat& q1) {
         return Quat(
             q1.W * q2.X + q1.X * q2.W + q1.Y * q2.Z - q1.Z * q2.Y,
             q1.W * q2.Y - q1.X * q2.Z + q1.Y * q2.W + q1.Z * q2.X,
