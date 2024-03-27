@@ -108,6 +108,10 @@ using time_point = chrono::steady_clock::time_point;
 
 
 static thread_local const __m256 AVX_ZEROS = _mm256_set1_ps(0);
+int one = 1;
+float float_one = *((float*)&one);
+static thread_local const __m256 AVX_FINT_ONES = _mm256_set1_ps(float_one);
+
 
 static thread_local XorGen gen;
 
@@ -302,8 +306,8 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
     m256_vec3 p1;
     m256_vec3 p1p2;
     m256_vec3 p1p3;
-    m256_vec3 normal;
-    m256_vec3 origin_offset;
+    XYZ normal[8];
+    XYZ origin_offset[8];
     m256_vec2 UV_basis;
     m256_vec2 U_delta;
     m256_vec2 V_delta;
@@ -335,8 +339,10 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
         p1 = m256_vec3(_p1);
         p1p2 = m256_vec3(_p1p2);
         p1p3 = m256_vec3(_p1p3);
-        normal = m256_vec3(_normal);
-        origin_offset = m256_vec3(_origin_offset);
+        for (int i = 0; i < tris.size(); i++) {
+            origin_offset[i] = _origin_offset[i];
+            normal[i] = _normal[i];
+        }
         UV_basis = m256_vec2(_UV_basis);
         U_delta = m256_vec2(_U_delta);
         V_delta = m256_vec2(_V_delta);
@@ -404,25 +410,25 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
             )
         );
     }
-    static void get_normal(const PTri_AVX& T, const m256_vec3& position, m256_vec3& output) {
-        __m256 dot;
-        m256_vec3 relative_position;
-        m256_vec3::sub(position, T.origin_offset, relative_position);
-        VecLib::dot_avx(T.normal, relative_position, dot); //this can probably be done faster via xor of sign bit rather than multiplication, but whatever
-        __m256 sgn = VecLib::sgn_fast(dot);
-        output.X = _mm256_mul_ps(
-            T.normal.X,
-            sgn
-        );
-        output.Y = _mm256_mul_ps(
-            T.normal.Y,
-            sgn
-        );
-        output.Z = _mm256_mul_ps(
-            T.normal.Z,
-            sgn
-        );
-    }
+    //static void get_normal(const PTri_AVX& T, const m256_vec3& position, m256_vec3& output) {
+    //    __m256 dot;
+    //    m256_vec3 relative_position;
+    //    m256_vec3::sub(position, T.origin_offset, relative_position);
+    //    VecLib::dot_avx(T.normal, relative_position, dot); //this can probably be done faster via xor of sign bit rather than multiplication, but whatever
+    //    __m256 sgn = VecLib::sgn_fast(dot);
+    //    output.X = _mm256_mul_ps(
+    //        T.normal.X,
+    //        sgn
+    //    );
+    //    output.Y = _mm256_mul_ps(
+    //        T.normal.Y,
+    //        sgn
+    //    );
+    //    output.Z = _mm256_mul_ps(
+    //        T.normal.Z,
+    //        sgn
+    //    );
+    //}
 };
 
 class Tri :public Primitive {
@@ -1736,25 +1742,22 @@ public:
                 tmaxy,
                 tmaxx
             ));
-        __m256 diff = _mm256_sub_ps(tmin, tmax);
-        __m256 return_mask = _mm256_cmp_ps(
-            tmin,
-            tmax,
-            _CMP_LT_OQ
-        );
-        __m256 min_mask = _mm256_cmp_ps(
-            tmin,
-            AVX_ZEROS,
-            _CMP_GE_OQ
-        );
-        __m256 final = _mm256_and_ps(
-            _mm256_add_ps(
+        __m256 return_mask = _mm256_and_ps(
+            _mm256_cmp_ps(
                 tmax,
-                _mm256_and_ps(
-                    diff,
-                    min_mask
-                )
+                AVX_ZEROS,
+                _CMP_GE_OQ
             ),
+            _mm256_cmp_ps(
+                tmin,
+                tmax,
+                _CMP_LT_OQ
+            )
+        );
+
+
+        __m256 final = _mm256_and_ps(
+            tmin,
             return_mask
         );
         //__m256 diff_is_pos = _mm256_cmp_ps(diff, AVX_ZEROS, _CMP_GT_OQ);
@@ -2300,21 +2303,23 @@ public:
         while (stack_index >= 0) {
             const float dist = distances[stack_index];
             const int self_triangles = tri_count[stack_index];
-            //if (dist >= res.distance) {
-            //    stack_index--;
-            //    continue;
-            //};
+            if (dist >= res.distance) {
+                stack_index--;
+                continue;
+            };
             if (self_triangles == 0) {
                 const BVH_AVX& current = data->avx_bvh[stack[stack_index]];
                 stack_index--;
                 auto m256_results = current.intersection(fusedposition, inv_slope);
+                
+                
                 //float results[8];
                 float* results = (float*)&m256_results;
                 int sorted_index[8];
                 int sorted_index_size = 0;
                 for (int i = 0; i < 8; i++) {
                     float& num = results[i];
-                    if (num > 0) {
+                    if (num != 0) {
                         int j = sorted_index_size - 1;
                         for (; j >= 0; j--) {
                             if (results[sorted_index[j]] > num) {
@@ -2329,15 +2334,22 @@ public:
                 for (int i = sorted_index_size - 1; i >= 0; i--) {
                     int selection_index = sorted_index[i];
                     float dist2 = results[selection_index];
-                    if (dist2 <= 0) {
-                        break;
-                    }
                     stack_index++;
                     stack[stack_index] = current.indexes[selection_index];
                     distances[stack_index] = dist2;
                     tri_count[stack_index] = current.leaf_size[selection_index];
-
+                
                 }
+
+                //stack_index++; places the bvhs in without order. Slower overall, but the simpler method makes it still viable.
+                //for (int i = 0; i < 8; i++) {
+                //    bool sgnbit = results[i] != 0;
+                //    stack[stack_index]      = current.indexes[i];
+                //    tri_count[stack_index]  = current.leaf_size[i];
+                //    distances[stack_index] = results[i];
+                //    stack_index+=sgnbit;
+                //}
+                //stack_index--;
 
                 //__m256 temp_m256 = simd_sort_1V(_mm256_max_ps(m256_results,AVX_ZEROS));
                 //float* temp = (float*) & temp_m256;
@@ -2390,7 +2402,7 @@ public:
 
                     const PTri_AVX& PTri_AVX_pack = (data->avx_tri_data)[i + start_index];
                     m256_vec3 intersection_stats;
-                    m256_vec3 normal_stats;
+                    //m256_vec3 normal_stats;
                     //vector<PackagedTri> pTris;
                     //vector<XYZ> real_res;
                     //vector<XYZ> real_normal;
@@ -2409,15 +2421,27 @@ public:
                     //    real_normal.push_back(Tri::get_normal(pTri.normal, position - pTri.origin_offset));
                     //    pTris.push_back(pTri);
                     //}
-
+                    //
+                    //PTri_AVX::intersection_check(PTri_AVX_pack, position_avx, slope_avx, intersection_stats);
+                    //PTri_AVX::get_normal(PTri_AVX_pack, position_avx, normal_stats);
+                    //
+                    //float* dists = (float*)&intersection_stats.X;
+                    //for (int i = 0; i < 8; i++) {
+                    //    if (dists[i] > 0 && dists[i] < res.distance) {
+                    //        res.distance = dists[i];
+                    //        res.normal = normal_stats.at(i);
+                    //        res.material = PTri_AVX_pack.materials[i];
+                    //        res.UV = intersection_stats.at(i);
+                    //        res.tri_index = PTri_AVX_pack.get_index(i);
+                    //    }
+                    //}
                     PTri_AVX::intersection_check(PTri_AVX_pack, position_avx, slope_avx, intersection_stats);
-                    PTri_AVX::get_normal(PTri_AVX_pack, position_avx, normal_stats);
 
                     float* dists = (float*)&intersection_stats.X;
                     for (int i = 0; i < 8; i++) {
                         if (dists[i] > 0 && dists[i] < res.distance) {
                             res.distance = dists[i];
-                            res.normal = normal_stats.at(i);
+                            res.normal = Tri::get_normal(PTri_AVX_pack.normal[i], position - PTri_AVX_pack.origin_offset[i]);
                             res.material = PTri_AVX_pack.materials[i];
                             res.UV = intersection_stats.at(i);
                             res.tri_index = PTri_AVX_pack.get_index(i);
@@ -2988,7 +3012,7 @@ public:
 };
 namespace ImageHandler {
     OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromFile("C:\\Users\\Charlie\\Libraries\\OCIOConfigs\\AgX-main\\config.ocio");
-    OCIO::ConstProcessorRcPtr processor = config->getProcessor(OCIO::ROLE_COLOR_PICKING, OCIO::ROLE_RENDERING);
+    OCIO::ConstProcessorRcPtr processor = config->getProcessor(OCIO::ROLE_SCENE_LINEAR,"AgX Base sRGB");
     auto compute = processor->getDefaultCPUProcessor();
     static decimal luminance(XYZ v)
     {
@@ -3040,19 +3064,17 @@ namespace ImageHandler {
         decimal e = 0.14;
         return XYZ::clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0, 1) * 255;
     }
-    XYZ post_process_pixel(XYZ luminence, int pre_scaled_gain, int post_scaled_gain) {
-        float lums = luminance(luminence);
-        float log_lum = pow(lums,1.0/2.2);
-        luminence = luminence * log_lum / lums;
-        //luminence = XYZ::log(luminence)*2;
-        float pixel[3] = { luminence[0],luminence[1],luminence[2] };
-        //compute->applyRGB(pixel);
-        return XYZ::clamp(XYZ(pixel[0], pixel[1], pixel[2]), 0, 1) * 255;//scaled_return;
+    XYZ post_process_pixel(XYZ lums) {  //lums is raw light data via RGB
+
+        float pixel[3] = { lums[0],lums[1],lums[2] };
+        compute->applyRGB(pixel);
+
+        return XYZ::clamp(XYZ(pixel[0],pixel[1],pixel[2]), 0, 1) * 255;//scale to 24 bit rgb
     }
     static void postProcessRaw(vector<vector<XYZ*>>* data) {
         for (vector<XYZ*>& data_row : *data) {
             for (XYZ*& pixel_ptr : data_row) {
-                *pixel_ptr = ImageHandler::post_process_pixel(*pixel_ptr, 1, 1);
+                *pixel_ptr = ImageHandler::post_process_pixel(*pixel_ptr);
             }
         }
     }
@@ -3526,7 +3548,7 @@ private:
                     iXY internal_offset = get_pixel_offset(pixel_index);
                     iXY final_position = block_offset + internal_offset;
                     (*raw_output[final_position.Y][final_position.X]) = *block->raws[pixel_index];
-                    XYZ color = ImageHandler::post_process_pixel(*raw_output[final_position.Y][final_position.X], 1, 1);
+                    XYZ color = ImageHandler::post_process_pixel(*raw_output[final_position.Y][final_position.X]);
                     p_strip.outputs.push_back(color);
                     //GUI.commit_pixel(color, final_position.X, final_position.Y);
 
@@ -3544,7 +3566,7 @@ private:
                 iXY internal_offset = get_pixel_offset(pixel_index);
                 iXY final_coord = block_offset + internal_offset;
                 (*raw_output[final_coord.Y][final_coord.X]) = *block->raws[pixel_index];
-                XYZ color = ImageHandler::post_process_pixel(*raw_output[final_coord.Y][final_coord.X], 1, 1);
+                XYZ color = ImageHandler::post_process_pixel(*raw_output[final_coord.Y][final_coord.X]);
                 GUI.commit_pixel(color, final_coord.X, final_coord.Y);
             }
         }
@@ -3719,7 +3741,7 @@ private:
                 iXY internal_offset = iXY(pixel_index % block_size, block_size - pixel_index / block_size - 1);
                 iXY final_position = block_offset + internal_offset;
                 (*raw_output[final_position.Y][final_position.X]) = *block->raws[pixel_index];
-                XYZ color = ImageHandler::post_process_pixel(*raw_output[final_position.Y][final_position.X], 1, 1);
+                XYZ color = ImageHandler::post_process_pixel(*raw_output[final_position.Y][final_position.X]);
                 GUI.commit_pixel(color, final_position.X, final_position.Y);
             }
         }
@@ -3762,7 +3784,7 @@ private:
     void refresh_canvas() {
         for (int y = 0; y < current_resolution_y; y++) {
             for (int x = 0; x < current_resolution_x; x++) {
-                XYZ color = ImageHandler::post_process_pixel(*raw_output[y][x], 1, 1);
+                XYZ color = ImageHandler::post_process_pixel(*raw_output[y][x]);
                 GUI.commit_pixel(color, x, y);
             }
         }
@@ -4345,7 +4367,7 @@ public:
                     cout << dir << endl;
                     li->position = translation;
                     li->rotation = dir;
-                    li->emission = XYZ(light_data.color) * light_data.intensity / 5000;
+                    li->emission = XYZ(light_data.color) * light_data.intensity / 10000;
                 }
                 if (li != nullptr) {
                     lights.push_back(li);
@@ -4406,6 +4428,12 @@ int main(int argc, char* argv[])
 
     gen.seed(rand(), rand(), rand(), rand());
 
+    TCHAR buffer[MAX_PATH] = { 0 };
+    GetModuleFileName(NULL, buffer, MAX_PATH);
+    std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
+    auto str = std::wstring(buffer).substr(0, pos);
+    cout << string(str.begin(), str.end()) << endl;
+
     VecLib::prep(gen);
     map<string, string> arg_bindings;
     if (argc > 1) {
@@ -4422,17 +4450,13 @@ int main(int argc, char* argv[])
     string host_port = "15413";
     string matcher_ip = "";
     string matcher_port = "15413";
-    int scalar = 4;
+    int scalar = 2;
     int resolution_x = 1080/scalar;
     int resolution_y = 1080/scalar;
     int subdivisions = 1;
     if (arg_bindings.count("-f")) fpath = arg_bindings["-f"];
     if (arg_bindings.count("-H")) mode = 1;
     if (arg_bindings.count("-S")) mode = 2;
-    if (arg_bindings.count("-hIP")) host_ip = arg_bindings["-hIP"];
-    if (arg_bindings.count("-hPort")) host_port = arg_bindings["-hPort"];
-    if (arg_bindings.count("-mIP")) matcher_ip = arg_bindings["-mIP"];
-    if (arg_bindings.count("-mPort")) matcher_port = arg_bindings["-mPort"];
     try {
         if (arg_bindings.count("-rX")) resolution_x = stoi(arg_bindings["-rX"]);
         if (arg_bindings.count("-rY")) resolution_y = stoi(arg_bindings["-rY"]);
