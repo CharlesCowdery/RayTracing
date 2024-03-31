@@ -7,10 +7,14 @@
 
 ![the big small render](https://github.com/CharlesCowdery/RayTracing/assets/54870004/302b9f06-bb9e-4698-b969-b1657ac4e76d)
 
+![scandanavian](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/eb36238a-ddbe-4780-9793-cef792b5d7d1)
+
+
 ## Features
 - Support for the open source GLTF file standard allows for easy interoperability with other software.
 - Materials are based on the industry standard BRDF reflectance model.
 - Full material texturing support, including normal mapping.
+- Vertex smoothing/smooth shading
 - Direct light sampling for all puctual light types.
 - Utilizes the OCIO standard to implement color spaces
 
