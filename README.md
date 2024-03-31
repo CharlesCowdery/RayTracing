@@ -7,16 +7,15 @@
 
 ![the big small render](https://github.com/CharlesCowdery/RayTracing/assets/54870004/302b9f06-bb9e-4698-b969-b1657ac4e76d)
 
-![scandanavian](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/eb36238a-ddbe-4780-9793-cef792b5d7d1)
-
+![scandian-small](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/4b448805-f122-4898-8f95-45d2c188f1a6)
 
 ## Features
-- Support for the open source GLTF file standard allows for easy interoperability with other software.
+- Support for the open source GLTF file standard for 3d scenes.
 - Materials are based on the industry standard BRDF reflectance model.
 - Full material texturing support, including normal mapping.
-- Vertex smoothing/smooth shading
+- Vertex smoothing/smooth shading.
 - Direct light sampling for all puctual light types.
-- Utilizes the OCIO standard to implement color spaces
+- Utilizes the OCIO standard to implement color spaces.
 
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
