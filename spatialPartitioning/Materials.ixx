@@ -4,6 +4,8 @@
 #include <math.h>;
 #include <assert.h>
 #include <malloc.h>
+#include <immintrin.h>
+
 import XYZ;
 import Matrix;
 import VecLib;
@@ -11,7 +13,7 @@ import XorRandom;
 export module Materials;
 
 #define PI 3.14159265358979323846264
-
+#define USE_MORTON 0
 using namespace std;
 
 export template <typename T>
@@ -24,6 +26,8 @@ public:
     XY scale = XY(1,1);
     XY offset = XY(0,0);
     T* data;//was originally a vector, but the red tape surrounding vector made texture loading very slow in debug mode
+
+
     Texture() {
         data = nullptr;
     }
@@ -32,15 +36,16 @@ public:
     }
     Texture(unsigned char* img, int width, int height, int components, T (*converter)(float,float,float)) {
         allocate(width, height);
-        int position = 0;
-        int data_pos = 0;
-        for (int y = 0; y < resolution_y; y++) {
-            for (int x = 0; x < resolution_x; x++) {
+        unsigned int position = 0;
+        unsigned int data_pos = 0;
+        for (unsigned int y = 0; y < resolution_y; y++) {
+            for (unsigned int x = 0; x < resolution_x; x++) {
                 position+=components;
                 float r = ((float)img[position + 0])/255.0;
                 float g = ((float)img[position + 1]) / 255.0;
                 float b = ((float)img[position + 2]) / 255.0;
-                data[data_pos] = (converter(r, g, b));
+                unsigned int address = to_memory(x, y);
+                data[address] = (converter(r, g, b));
                 data_pos++;
             }
         }
@@ -58,6 +63,30 @@ public:
         tex->data = data;
         return tex;
     }
+
+
+    unsigned int direct_size(unsigned int rX, unsigned int rY) {
+        return rX * rY;
+    }
+    unsigned int morton_size(unsigned int rX, unsigned rY) {
+        int largest_axis = max(rX, rY);
+        int power_2_axes = ceil(log2(largest_axis));
+        return pow(pow(2, power_2_axes),2);
+    }
+    unsigned int get_memory_size(unsigned int rX, unsigned int rY) {
+#if USE_MORTON 
+        return morton_size(rX, rY);
+#else          
+        return direct_size(rX, rY);
+#endif
+    }
+    void allocate(int rx, int ry) {
+        resolution_x = rx;
+        resolution_y = ry;
+        unsigned int memory_size = get_memory_size(rx, ry);
+        data = (T*)_aligned_malloc(sizeof(T) * memory_size, 64);
+    }
+
     void set_transform(XY _scale, XY _offset) {
         scale = _scale;
         offset = _offset;
@@ -65,11 +94,7 @@ public:
     int size() {
         return resolution_x * resolution_y;
     }
-    void allocate(int rx, int ry) {
-        resolution_x = rx;
-        resolution_y = ry;
-        data = (T*)_aligned_malloc(sizeof(T) * ry * rx,64);
-    }
+
     Texture<float>* export_channel(int channel) {
         Texture<float>* out = new Texture<float>();
         out->allocate(resolution_x, resolution_y);
@@ -87,12 +112,27 @@ public:
         U_multiplier = resolution_x*scale.X;
         V_multiplier = resolution_y*scale.Y;
     }
+    unsigned int to_morton(unsigned int x, unsigned int y) {
+        return _pdep_u64(x, 0x5555555555555555) | _pdep_u64(y, 0xaaaaaaaaaaaaaaaa);
+    }
+    unsigned int to_direct_address(unsigned int x, unsigned int y) {
+        return y * resolution_x + x;
+    }
+    unsigned int to_memory(unsigned int x, unsigned int y) {
+#if USE_MORTON
+        return to_morton(x, y);
+#else
+        return to_direct_address(x, y);
+#endif
+    }
+
     T lookup(int x, int y) {
         x = x % resolution_x;
         y = y % resolution_y;
         if (x < 0) x = resolution_x + x;
         if (y < 0) y = resolution_y + y;
-        return data[y*resolution_x+x];
+        unsigned int address = to_memory(x, y);
+        return data[address];
     }
     T getUV(double U, double V) {
         V = 1 - V;
@@ -181,7 +221,7 @@ public:
 
     MaterialSample(XYZ _color, float _roughness, float _metallic, float _specular, XYZ _emissive, XYZ _normal) {
         color = _color;
-        roughness = _roughness * 0.7 + 0.3;
+        roughness = _roughness * 0.8 + 0.2;
         metallic = _metallic;
         specular = _specular;
         emissive = _emissive;
@@ -332,7 +372,7 @@ public:
     }
     XYZ reflective_bounce(XorGen& G, const Matrix3x3& reflection_rotation) const {
         XYZ dir = VecLib::generate_unbiased_random_hemi(G);
-        double r_v = (roughness - 0.3) / 0.7;
+        double r_v = (roughness - 0.2) / 0.8;
         float dist = 1 / (pow(r_v+1,4) - 1)-0.05;
         dir.Y += dist;
         XYZ slope = XYZ::normalize(dir);

@@ -171,7 +171,9 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Materials.ixx" />
+    <ClCompile Include="Materials.ixx">
+      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</Optimization>
+    </ClCompile>
     <ClCompile Include="Matrix.ixx" />
     <ClCompile Include="VecLib.ixx" />
     <ClCompile Include="XorRandom.ixx" />

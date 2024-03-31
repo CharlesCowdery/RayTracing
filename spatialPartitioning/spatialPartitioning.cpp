@@ -75,6 +75,8 @@ import Materials;
 #define DRAW_UV 0
 #define DRAW_BOUNCE_DIRECTION 0
 #define DRAW_NORMAL 0
+#define DRAW_NORMAL_DELTAS 0
+#define DRAW_NORMAL_FACING 0
 #define DRAW_EMISSIVE 0
 
 
@@ -205,7 +207,8 @@ struct CastResults {
     XYZ normal;
     Material* material;
     decimal distance;
-    XYZ UV = XYZ(-1);
+    XYZ TUV = XYZ(-1);
+    XY texUV = XY(-1);
     int parent_index = 0;
     int tri_index = 0;
     CastResults() : normal(XYZ()), material(nullptr), distance(default_distance) {};
@@ -265,12 +268,27 @@ public:
     }
 };
 
+class PointLight : public Light {
+public:
+    XYZ radius;
+    XYZ vectorTo(XYZ& pos2) override {
+        return XYZ::slope(pos2, position);
+    }
+};
+
 
 struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1;
     XYZ normal;
-    XYZ tangent;
-    XYZ bitangent;
+    XYZ n1;
+    XYZ n2;
+    XYZ n3;
+    XYZ t1;
+    XYZ t2;
+    XYZ t3;
+    XYZ b1;
+    XYZ b2;
+    XYZ b3;
     XYZ p1p3;
     XYZ p1p2;
     XY UV_basis;
@@ -288,17 +306,37 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
         V_delta = UV_V - UV_base;
         UV_basis = UV_base;
         normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
-        tangent = XYZ::normalize(p1p3 * U_delta.X - p1p2 * V_delta.X);
-        bitangent = XYZ::normalize(p1p2 * V_delta.Y - p1p3 * U_delta.Y);
         origin_offset = XYZ::dot((_p1 + _p2 + _p3) / 3, normal) * normal;
     }
-    static bool equals(const PackagedTri& t1, const PackagedTri& t2) {
-        bool test1 = XYZ::equals(t1.p1, t2.p1);
-        bool test2 = XYZ::equals(t1.normal, t2.normal);
-        bool test3 = XYZ::equals(t1.p1p3, t2.p1p3);
-        bool test4 = XYZ::equals(t1.p1p2, t2.p1p2);
-        bool test5 = t1.material == t2.material;
-        return test1 && test2 && test3 && test4 && test5;
+    XYZ get_normal(float u, float v) {
+        float k = 1 - u - v;
+        return  XYZ::normalize(n1 * k + n2 * u + n3 * v);
+    }
+    XYZ get_tangent(float u, float v) {
+        float k = 1 - u - v;
+        return  XYZ::normalize(t1 * k + t2 * u + t3 * v);
+    }
+    XYZ get_bitangent(float u, float v) {
+        float k = 1 - u - v;
+        return  XYZ::normalize(b1 * k + b2 * u + b3 * v);
+    }
+    void calculate_tangents() {
+        t1 = XYZ::normalize(p1p3 * U_delta.X - p1p2 * V_delta.X);;
+        t2 = t1;
+        t3 = t1;
+    }
+    void calculate_bitangents() {
+        b1 = XYZ::normalize(p1p2 * V_delta.Y - p1p3 * U_delta.Y);
+        b2 = b1;
+        b3 = b1;
+    }
+    void reorthogonalize() {
+        t1 = XYZ::normalize(t1-n1*XYZ::dot(t1, n1));
+        t2 = XYZ::normalize(t2-n2*XYZ::dot(t2, n1));
+        t3 = XYZ::normalize(t3-n3*XYZ::dot(t3, n1));
+        b1 = XYZ::cross(n1, t1);
+        b2 = XYZ::cross(n2, t2);
+        b3 = XYZ::cross(n3, t3);
     }
 };
 
@@ -308,9 +346,6 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
     m256_vec3 p1p3;
     XYZ normal[8];
     XYZ origin_offset[8];
-    m256_vec2 UV_basis;
-    m256_vec2 U_delta;
-    m256_vec2 V_delta;
     Material* materials[8];
     int index = 0;
     char size = 0;
@@ -320,9 +355,6 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
         vector<XYZ> _p1p3;
         vector<XYZ> _normal;
         vector<XYZ> _origin_offset;
-        vector<XY>  _UV_basis;
-        vector<XY>  _U_delta;
-        vector<XY>  _V_delta;
         size = tris.size();
         for (int i = 0; i < tris.size() && i < 8; i++) {
             PackagedTri& tri = tris[i];
@@ -331,9 +363,6 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
             _p1p3.push_back(tri.p1p3);
             _normal.push_back(tri.normal);
             _origin_offset.push_back(tri.origin_offset);
-            _UV_basis.push_back(tri.UV_basis);
-            _U_delta.push_back(tri.U_delta);
-            _V_delta.push_back(tri.V_delta);
             materials[i] = tri.material;
         }
         p1 = m256_vec3(_p1);
@@ -343,9 +372,6 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
             origin_offset[i] = _origin_offset[i];
             normal[i] = _normal[i];
         }
-        UV_basis = m256_vec2(_UV_basis);
-        U_delta = m256_vec2(_U_delta);
-        V_delta = m256_vec2(_V_delta);
     }
     int get_index(int i) const {
         return index + i;
@@ -391,24 +417,8 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
             output.X
         );
 
-        output.Y = _mm256_fmadd_ps( //u
-            uv.X,
-            T.U_delta.X,
-            _mm256_fmadd_ps(
-                uv.Y,
-                T.V_delta.X,
-                T.UV_basis.X
-            )
-        );
-        output.Z = _mm256_fmadd_ps( //v
-            uv.X,
-            T.U_delta.Y,
-            _mm256_fmadd_ps(
-                uv.Y,
-                T.V_delta.Y,
-                T.UV_basis.Y
-            )
-        );
+        output.Y = uv.X;
+        output.Z = uv.Y;
     }
     //static void get_normal(const PTri_AVX& T, const m256_vec3& position, m256_vec3& output) {
     //    __m256 dot;
@@ -439,6 +449,9 @@ public:
     XY UV_1;
     XY UV_2;
     XY UV_3;
+    XYZ n1;
+    XYZ n2;
+    XYZ n3;
     XYZ midpoint;
     XYZ AABB_max;
     XYZ AABB_min;
@@ -450,6 +463,12 @@ public:
         UV_1 = _UV_1;
         UV_2 = _UV_2;
         UV_3 = _UV_3;
+        XYZ p1p3 = _p3 - p1;
+        XYZ p1p2 = _p2 - p1;
+        XYZ normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
+        n1 = normal;
+        n2 = normal;
+        n3 = normal;
     }
     Tri(XYZ _p1, XYZ _p2, XYZ _p3, Material* _material) : Primitive(_material),
         p1(_p1), p2(_p2), p3(_p3) {
@@ -500,9 +519,16 @@ public:
         return (XYZ::dot(normal, relative_position) > 0) ? normal : -normal;
     }
     PackagedTri pack() {
-        return PackagedTri(
+        PackagedTri PT = PackagedTri(
             p1, p2, p3, UV_1, UV_2, UV_3, material
         );
+        PT.n1 = n1;
+        PT.n2 = n2;
+        PT.n3 = n3;
+        PT.calculate_tangents();
+        PT.calculate_bitangents();
+        PT.reorthogonalize();
+        return PT;
     }
 };
 
@@ -642,6 +668,7 @@ private:
     Quat* rot_transform = nullptr;
     XYZ* XYZ_transform = nullptr;
 public:
+
     Transformation(XYZ transformation, Quat rotation) {
         rot_transform = new Quat(rotation);
         XYZ_transform = new XYZ(transformation);
@@ -651,6 +678,9 @@ public:
     }
     Transformation(XYZ transformation) {
         XYZ_transform = new XYZ(transformation);
+    }
+    Transformation rotation() {
+        return Transformation(*rot_transform);
     }
     void stack(XYZ& XYZ_transf, Quat& rotation) {
         if (XYZ_transform != nullptr) {
@@ -691,12 +721,25 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
         T.apply(np1);
         T.apply(np2);
         T.apply(np3);
+        XYZ _n1 = t.n1;
+        XYZ _n2 = t.n2;
+        XYZ _n3 = t.n3;
+        T.rotation().apply(_n1);
+        T.rotation().apply(_n2);
+        T.rotation().apply(_n3);
         np1 += origin;
         np2 += origin;
         np3 += origin;
-        return PackagedTri(
+        PackagedTri PT = PackagedTri(
             np1, np2, np3, t.UV_1, t.UV_2, t.UV_3, t.material
         );
+        PT.n1 = _n1;
+        PT.n2 = _n2;
+        PT.n3 = _n3;
+        PT.calculate_tangents();
+        PT.calculate_bitangents();
+        PT.reorthogonalize();
+        return PT;
     }
     Tri transformT(Tri& t, Transformation T, XYZ origin, XYZ scale) {
         XYZ np1 = t.p1 - origin;
@@ -708,12 +751,22 @@ namespace Packers { //I wanted to put these methods in the primitives objects, b
         T.apply(np1);
         T.apply(np2);
         T.apply(np3);
+        XYZ _n1 = t.n1;
+        XYZ _n2 = t.n2;
+        XYZ _n3 = t.n3;
+        T.rotation().apply(_n1);
+        T.rotation().apply(_n2);
+        T.rotation().apply(_n3);
         np1 += origin;
         np2 += origin;
         np3 += origin;
-        return Tri(
+        Tri Tr = Tri(
             np1, np2, np3, t.UV_1, t.UV_2, t.UV_3, t.material
         );
+        Tr.n1 = _n1;
+        Tr.n2 = _n2;
+        Tr.n3 = _n3;
+        return Tr;
     }
 }
 
@@ -1230,8 +1283,8 @@ private:
         };
     };
     pair<Split*, BinResults> binned_split_probe(vector<Tri*>* geo) {
-        int min_bins = 10000;
-        int max_bins = 10000;
+        int min_bins = 10;
+        int max_bins = 1000;
         int bin_count = std::max(min_bins, std::min(max_bins, (int)geo->size()));
         int adaptive_bin_count = 3;
         int adpative_sweep_recusion_count = 1;
@@ -1551,6 +1604,39 @@ private:
 };
 
 
+
+class OctBVH {
+public:
+    OctBVH* children[8];
+    XYZ max;
+    XYZ min;
+    vector<Tri*> elements;
+    OctBVH* parent;
+
+    struct bounding_packet {
+        Tri** tris;
+        XYZ max;
+        XYZ min;
+        void reserve(unsigned int count) {
+            tris = (Tri**) _aligned_malloc(sizeof(Tri*) * count, 64);
+        }
+        ~bounding_packet() {
+            free(tris);
+        }
+    };
+    void construct(vector<Tri>* tris) {
+        bounding_packet* entry_packet = new bounding_packet();
+        entry_packet->reserve(tris->size());
+        for (int i = 0; i < tris->size(); i++) {
+            entry_packet->tris[i] = &(*tris)[i];
+        }
+        recurse_construct(entry_packet, this);
+    }
+private:
+    void recurse_construct(bounding_packet* BP, OctBVH* parent) {
+
+    }
+};
 
 class PackagedBVH { //memory optimized. produced once the BVH tree is finalized
 public:
@@ -2002,20 +2088,6 @@ public:
     }
 };
 
-const Matrix3x3 ACESOutputMat = Matrix3x3(
-    1.60475, -0.53108, -0.07367,
-    -0.10208, 1.10813, -0.00605,
-    -0.00327, -0.07276, 1.07602
-);
-
-const Matrix3x3 ACESInputMat = Matrix3x3( //https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
-    0.59719, 0.35458, 0.04823,
-    0.07600, 0.90834, 0.01566,
-    0.02840, 0.13383, 0.83777
-);
-
-
-
 struct Casting_Diagnostics {
     long reflections_cast = 0;
     long shadows_cast = 0;
@@ -2194,64 +2266,7 @@ public:
 };
 #define AVX_STACK_SIZE 256
 
-template <typename t> struct DisArray {
-    //discontinous array. indexes are not stored continously, therefore there is no performance penalty for gaps in index. its essentially a map masquerading as an array
-    //this implementation heavily favors smaller arrays, as searching for an index is O(n)
-    vector<int> entries;
-    vector<t> values;
-    int get_index(int index) {
-        for (int i = 0; i < entries.size(); i++) {
-            if (entries[i] == index) {
-                return i;
-            }
-        }
-        return -1;
-    }
-    void insert(int index, t item = t()) {
-        entries.push_back(index);
-        std::sort(entries.begin(), entries.end());
-        auto at = get_index(index);
-        if (at == values.size() - 1) {
-            values.push_back(item);
-        }
-        else {
-            values.insert(values.begin() + at, item);
-        }
-    }
-    t at(int val) const {
-        return (*this)[val];
-    }
-    t& operator[](int val) {
-        return values[get_index(val)];
-    }
-};
 
-
-
-struct RaypacketPartitioner {
-    double part_size = 0.05;
-    XYZ origin = XYZ(0, 0, 0);
-    int rays_queued = 0;
-    DisArray<DisArray<DisArray<vector<PackagedRay>>>> partitions;
-    void add_ray(PackagedRay& R) {
-        rays_queued++;
-        int x_index = floor(R.position.X / part_size);
-        int y_index = floor(R.position.Y / part_size);
-        int z_index = floor(R.position.Z / part_size);
-        if (!partitions.get_index(x_index)) {
-            partitions.insert(x_index);
-        }
-        auto x_partition = partitions[x_index];
-        if (!x_partition.get_index(y_index)) {
-            x_partition.insert(y_index);
-        }
-        auto y_partition = partitions[y_index];
-        if (!y_partition.get_index(z_index)) {
-            y_partition.insert(z_index);
-        }
-        auto z_partition = partitions[z_index];
-    }
-};
 
 struct AVX_AABB_ray {
     m256_vec3 fusedposition;
@@ -2443,7 +2458,7 @@ public:
                             res.distance = dists[i];
                             res.normal = Tri::get_normal(PTri_AVX_pack.normal[i], position - PTri_AVX_pack.origin_offset[i]);
                             res.material = PTri_AVX_pack.materials[i];
-                            res.UV = intersection_stats.at(i);
+                            res.TUV = intersection_stats.at(i);
                             res.tri_index = PTri_AVX_pack.get_index(i);
                         }
                     }
@@ -2517,7 +2532,7 @@ public:
                             res.distance = distance.X;
                             res.normal = Tri::get_normal(t.normal, position  - t.origin_offset);
                             res.material = t.material;
-                            res.UV = distance;
+                            res.TUV = distance;
                         }
                     }
                 }
@@ -2613,32 +2628,48 @@ public:
         stats.rays_processed++;
         //cout << out;
         //string out ="vector(" + ray_data.position.to_string() + "," +(ray_data.position + ray_data.slope).to_string()  +"),";
-
+        XYZ orig = ray_data.position;
         CastResults results = execute_ray_cast(ray_data.position, ray_data.slope);
+        PackagedTri& Tri = data->tri_data[results.tri_index];
+        results.texUV.X = results.TUV.Y * Tri.U_delta.X + results.TUV.Z * Tri.V_delta.X + Tri.UV_basis.X;
+        results.texUV.Y = results.TUV.Y * Tri.U_delta.Y + results.TUV.Z * Tri.V_delta.Y + Tri.UV_basis.Y;
         //results.normal = -results.normal;
         //*ray_data.output += ray_data.coefficient * ((results.normal)+1)/2;
         if (results.material == nullptr) {
             return XYZ(0);
         }
-        MaterialSample material = results.material->sample_UV(results.UV.Y, results.UV.Z);
+        MaterialSample material = results.material->sample_UV(results.texUV.X, results.texUV.Y);
         XYZ aggregate = XYZ();
-        XYZ normal = results.normal;
+        XYZ normal = Tri::get_normal(Tri.get_normal(results.TUV.Y,results.TUV.Z),orig-Tri.origin_offset);
         if (!XYZ::equals(XYZ(0, 0, 0), material.normal)) {
-            XYZ& T = data->tri_data[results.tri_index].tangent;
-            XYZ& BT = data->tri_data[results.tri_index].bitangent;
-            normal = material.normal.X * T + material.normal.Y * BT + material.normal.Z * results.normal;
+            XYZ T  = Tri.get_tangent(results.TUV.Y,results.TUV.Z);
+            XYZ BT = Tri.get_bitangent(results.TUV.Y, results.TUV.Z);
+            normal = material.normal.X * T + material.normal.Y * BT + material.normal.Z * normal;
 
         }
         if (DRAW_UV) {
-            if (results.UV.X != -1) {
+            if (results.TUV.X != -1) {
                 XYZ color;
-                color.X = results.UV.Y;
-                color.Y = results.UV.Z;
+                color.X = results.texUV.X;
+                color.Y = results.texUV.Y;
                 color.Z = 1 - color.X - color.Y;
                 return color * 1;
             }
         }
-        if (DRAW_NORMAL) return (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
+        if (DRAW_NORMAL) {
+            XYZ res = (normal);
+            return (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
+
+        }
+        if (DRAW_NORMAL_DELTAS) {
+            XYZ res = (results.normal - normal);
+            if (res.magnitude() < 0.1) {
+                return XYZ(0, 0, 0);
+            }
+            return (XYZ::normalize(res) / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
+
+        }
+        if (DRAW_NORMAL_FACING) return XYZ::dot(normal, orig) / abs(XYZ::dot(normal, orig));
         if (DRAW_COLOR) return material.color;
         if (false) {
             if (ray_data.generation == 1)
@@ -3027,49 +3058,15 @@ namespace ImageHandler {
 
     //decimal realistic_response(decimal f, decimal iso) // https://graphics-programming.org/resources/tonemapping/index.html
 
-    static decimal Filmic_curve(decimal t) {
-        return 0.371 * (sqrt(t) + 0.28257 * log(t) + 1.69542);
-    }
-    static XYZ reinhard_extended_luminance(XYZ v, decimal max_white_l)
-    {
-        decimal l_old = luminance(v);
-        decimal numerator = l_old * (1.0 + (l_old / (max_white_l * max_white_l)));
-        decimal l_new = numerator / (1.0 + l_old);
-        return change_luminance(v, l_new);
-    }
-
-
-    static XYZ RRTAndODTFit(XYZ v)
-    {
-        XYZ a = v * (v + 0.0245786f) - 0.000090537f;
-        XYZ b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
-        return a / b;
-    }
-    static XYZ ACESFitted(XYZ color)
-    {
-        color = Matrix3x3::multiply_horizontally(ACESInputMat, color);
-
-        // Apply RRT and ODT
-        color = RRTAndODTFit(color);
-
-        color = Matrix3x3::multiply_horizontally(ACESOutputMat, color);
-
-        return XYZ::clamp(color, 0, 1) * 255;
-    }
-    static XYZ FastACES(XYZ x) {
-        decimal a = 2.51;
-        decimal b = 0.03;
-        decimal c = 2.43;
-        decimal d = 0.59;
-        decimal e = 0.14;
-        return XYZ::clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0, 1) * 255;
-    }
     XYZ post_process_pixel(XYZ lums) {  //lums is raw light data via RGB
 
         float pixel[3] = { lums[0],lums[1],lums[2] };
         compute->applyRGB(pixel);
+        lums = XYZ(pixel[0], pixel[1], pixel[2]);
+        float post_lum = pow(luminance(lums),1/2.2);
+        lums = lums * post_lum / luminance(lums);
 
-        return XYZ::clamp(XYZ(pixel[0],pixel[1],pixel[2]), 0, 1) * 255;//scale to 24 bit rgb
+        return XYZ::clamp(lums, 0, 1) * 255;//scale to 24 bit rgb
     }
     static void postProcessRaw(vector<vector<XYZ*>>* data) {
         for (vector<XYZ*>& data_row : *data) {
@@ -4043,7 +4040,27 @@ public:
                 break;
             }
         }
-        void get_vec_data(int accessor_index, vector<XYZ>& target) {
+        void get_vec4_data(int accessor_index, vector<Quat>& target) {
+            auto& accessor = data.accessors[accessor_index];
+            assert(accessor.type == 4);
+
+            vector<float> float_data;
+            get_float_data(accessor_index, float_data);
+            for (int i = 0; i < accessor.count; i++) {
+                target.push_back(Quat(float_data[i * 4], float_data[i * 4 + 1], float_data[i * 4 + 2], float_data[i * 4 + 3]));
+            }
+        }
+        void get_vec4_data_strip(int accessor_index, vector<XYZ>& target) {
+            auto& accessor = data.accessors[accessor_index];
+            assert(accessor.type == 4);
+
+            vector<float> float_data;
+            get_float_data(accessor_index, float_data);
+            for (int i = 0; i < accessor.count; i++) {
+                target.push_back(XYZ(float_data[i * 4], float_data[i * 4 + 1], float_data[i * 4 + 2]));
+            }
+        }
+        void get_vec3_data(int accessor_index, vector<XYZ>& target) {
             auto& accessor = data.accessors[accessor_index];
             assert(accessor.type == 3);
 
@@ -4177,7 +4194,7 @@ public:
             mat->color.set_static(XYZ(pbr.baseColorFactor));
             mat->metallic.set_static(pbr.metallicFactor);
             mat->roughness.set_static(pbr.roughnessFactor);
-            mat->emissive.set_static(XYZ(emissive) * 50);
+            mat->emissive.set_static(XYZ(emissive) * 7.5);
 
             if (pbr.baseColorTexture.index != -1) {
                 int t_index = pbr.baseColorTexture.index;
@@ -4203,7 +4220,11 @@ public:
                 
 
                 if (pbr.metallicFactor != 0) {
-                    if (pbr.metallicFactor != 1) throw exception("Illegal metallic factor");
+                    if (pbr.metallicFactor != 1) {
+                        for (int i = 0; i < metallic->size(); i++) {
+                            metallic->data[i] *= pbr.metallicFactor;
+                        }
+                    }
                     mat->metallic.set_texture(metallic);
                 }
                 if (pbr.roughnessFactor != 0) {
@@ -4223,7 +4244,7 @@ public:
                 int count = tex->size();
                 for (int i = 0; i < count; i++) {
                     XYZ in = tex->data[i];
-                    XYZ out = XYZ::normalize((XYZ::normalize(in) * 2 - 1) * XYZ(scale, scale, 1.0));
+                    XYZ out = XYZ::normalize((in * 2 - 1) * XYZ(scale, scale, 1.0));
                     tex->data[i] = out;
                 }
 
@@ -4231,7 +4252,7 @@ public:
                 tex->set_transform(transform_data.first, transform_data.second);
 
                 mat->normal.set_texture(tex);
-                mat->use_normals = true;
+                mat->use_normals = 1;
                 cout << padString("", " ", 100) << "\x1b[A\r";
             }
             if (material_data.extensions.count("KHR_materials_specular")) {
@@ -4274,17 +4295,32 @@ public:
 
                 assert(attributes.count("POSITION") > 0);
                 auto  position_accessor_index = attributes["POSITION"];
-                auto& position_accessor = data.accessors[position_accessor_index];
-
                 auto texcoord_accessor_index = attributes["TEXCOORD_"+to_string(mat->UV_map_index)];
-                auto& texcoord_accessor = data.accessors[texcoord_accessor_index];
+                auto normal_accessor_index = attributes["NORMAL"];
+                auto tangent_accessor_index = attributes["TANGENT"];
+                auto tangent_accessor = data.accessors[tangent_accessor_index];
 
                 vector<XYZ> position_data;
-                buf_accessor.get_vec_data(position_accessor_index, position_data);
+                buf_accessor.get_vec3_data(position_accessor_index, position_data);
 
                 vector<XY> texcoord_data;
                 buf_accessor.get_vec2_data(texcoord_accessor_index, texcoord_data);
 
+                bool smooth_shading = normal_accessor_index != 0;
+                smooth_shading &= 1;
+                vector<XYZ> normal_data;
+                if (smooth_shading) {
+                    buf_accessor.get_vec3_data(normal_accessor_index, normal_data);
+                }
+
+
+                //vector<XYZ> tangent_data;
+                //if (tangent_accessor.type == 4) {
+                //    buf_accessor.get_vec4_data_strip(tangent_accessor_index, tangent_data);
+                //}
+                //else {
+                //    buf_accessor.get_vec3_data(tangent_accessor_index, tangent_data);
+                //}
 
                 assert(primitive.indices >= 0);
                 auto  indices_accessor_index = primitive.indices;
@@ -4298,14 +4334,23 @@ public:
 
                 mesh->tris.reserve(mesh->tris.size() + tri_count);
                 for (int i = 0; i < tri_count; i++) {
-                    XYZ v1 = position_data[indices[i * 3 + 0]].swizzle(swizzle);
-                    XYZ v2 = position_data[indices[i * 3 + 1]].swizzle(swizzle);
-                    XYZ v3 = position_data[indices[i * 3 + 2]].swizzle(swizzle);
-                    XY uv1 = XY(0,1)-XY(-1,1)*texcoord_data[indices[i * 3 + 0]];
-                    XY uv2 = XY(0,1)-XY(-1,1)*texcoord_data[indices[i * 3 + 1]];
-                    XY uv3 = XY(0,1)-XY(-1,1)*texcoord_data[indices[i * 3 + 2]];
+                    int look_1 = indices[i * 3 + 0];
+                    int look_2 = indices[i * 3 + 1];
+                    int look_3 = indices[i * 3 + 2];
+                    XYZ v1 = position_data[look_1].swizzle(swizzle);
+                    XYZ v2 = position_data[look_2].swizzle(swizzle);
+                    XYZ v3 = position_data[look_3].swizzle(swizzle);
+                    XY uv1 = XY(0,1)-XY(-1,1)*texcoord_data[look_1];
+                    XY uv2 = XY(0,1)-XY(-1,1)*texcoord_data[look_2];
+                    XY uv3 = XY(0,1)-XY(-1,1)*texcoord_data[look_3];
+                    
                     //cout << v1 << " " << v2 << " " << v3 << " " << uv1 << " " << uv2 << " " << uv3 << endl;
-                    Tri T = Tri(v1, v2, v3,uv1,uv2,uv3, mat);
+                    Tri T = Tri(v1, v2, v3, uv1,uv2,uv3, mat);
+                    if (smooth_shading) {
+                        T.n1 = normal_data[look_1].swizzle(swizzle);
+                        T.n2 = normal_data[look_2].swizzle(swizzle);
+                        T.n3 = normal_data[look_3].swizzle(swizzle);
+                    }
                     mesh->addTri(T);
                 }
             }
@@ -4317,7 +4362,7 @@ public:
             assert(camera_data.type == "perspective");
             auto& perspective = camera_data.perspective;
             auto aspect_ratio = perspective.aspectRatio;
-            Lens* lens = new RectLens(1, aspect_ratio);
+            Lens* lens = new RectLens(aspect_ratio, 1);
             float distance = 0.5 / tan(0.5 * perspective.yfov);
             Camera* camera = new Camera(XYZ(), lens, XYZ(0, distance, 0));
             cameras.push_back(camera);
@@ -4339,7 +4384,7 @@ public:
             }
             if (node_data.mesh > -1) {
                 XYZ scale = XYZ(1);
-                XYZ translation = XYZ();
+                XYZ translation = XYZ(0,0,0);
                 Quat rotation = Quat(0,0,0,1);
                 if (node_data.scale.size() > 0) scale = XYZ(node_data.scale, scale_swizzle);
                 if (node_data.translation.size() > 0) translation = XYZ(node_data.translation, swizzle);
@@ -4367,7 +4412,7 @@ public:
                     cout << dir << endl;
                     li->position = translation;
                     li->rotation = dir;
-                    li->emission = XYZ(light_data.color) * light_data.intensity / 10000;
+                    li->emission = XYZ(light_data.color) * light_data.intensity / 50000;
                 }
                 if (li != nullptr) {
                     lights.push_back(li);
@@ -4394,8 +4439,9 @@ public:
         }
         int default_scene = data.defaultScene;
         auto scene_data = data.scenes[default_scene];
-        for (auto& node_index : scene_data.nodes) {
-            auto& node_register = node_lookup[node_index];
+        //for (auto& node_index : scene_data.nodes) {
+        for(int i = 0; i < node_lookup.size(); i++){ //this is 100% incorrect, but I was getting weird import issues
+            auto& node_register = node_lookup[i];
             int node_type = node_register.first;
             int lookup_index = node_register.second;
             if (node_type == 0) {
@@ -4445,12 +4491,13 @@ int main(int argc, char* argv[])
         arg_bindings[prev] = "";
     }
     int mode = 0;
-    string fpath = "C:\\Users\\Charlie\\Documents\\models\\Scenes\\room.glb";
+    string fpath = "C:\\Users\\Charlie\\Documents\\models\\Scenes\\dining.glb";
+    //string fpath = "C:\\Users\\Charlie\\Documents\\models\\Scenes\\title.glb";
     string host_ip = "127.0.0.1";
     string host_port = "15413";
     string matcher_ip = "";
     string matcher_port = "15413";
-    int scalar = 2;
+    int scalar = 1;
     int resolution_x = 1080/scalar;
     int resolution_y = 1080/scalar;
     int subdivisions = 1;

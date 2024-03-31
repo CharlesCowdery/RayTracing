@@ -21,6 +21,7 @@ export struct XY {
     float X;
     float Y;
     XY() :X(0), Y(0) {}
+    XY(float v) : X(v), Y(v) {}
     XY(float _x, float _y) : X(_x), Y(_y) {}
     XY operator+(const XY& other) const {
         return XY(X + other.X, Y + other.Y);
