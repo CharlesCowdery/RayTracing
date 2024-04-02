@@ -171,19 +171,40 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Materials.ixx">
+    <ClCompile Include="commons.cpp" />
+    <ClCompile Include="Coredefs.cpp" />
+    <ClCompile Include="Coredefs.h" />
+    <ClCompile Include="Materials.h">
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Disabled</Optimization>
     </ClCompile>
-    <ClCompile Include="Matrix.ixx" />
-    <ClCompile Include="VecLib.ixx" />
-    <ClCompile Include="XorRandom.ixx" />
-    <ClCompile Include="XYZ.ixx" />
-    <ClCompile Include="spatialPartitioning.cpp" />
+    <ClCompile Include="Matrix.h" />
+    <ClCompile Include="VecLib.cpp" />
+    <ClCompile Include="VecLib.h" />
+    <ClCompile Include="XorRandom.cpp" />
+    <ClCompile Include="XorRandom.h" />
+    <ClCompile Include="XYZ.cpp" />
+    <ClCompile Include="_XYZ.deprecated">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="Main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="common.h" />
-    <ClInclude Include="Structures.h" />
+    <ClInclude Include="Camera.h" />
+    <ClInclude Include="commons.h" />
+    <ClInclude Include="BVH.h" />
+    <ClInclude Include="Config.h" />
+    <ClInclude Include="FileLoading.h" />
+    <ClInclude Include="GUI.h" />
+    <ClInclude Include="Texture.h" />
+    <ClInclude Include="ImageProcessing.h" />
+    <ClInclude Include="Primitives.h" />
     <ClInclude Include="json.hpp" />
+    <ClInclude Include="Core.h" />
+    <ClInclude Include="Ray.h" />
+    <ClInclude Include="Scene.h" />
+    <ClInclude Include="SceneManager.h" />
+    <ClInclude Include="Transformation.h" />
+    <ClInclude Include="XYZ.h" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="Addon.py" />

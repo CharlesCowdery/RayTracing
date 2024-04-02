@@ -1,10 +1,8 @@
+#pragma once
+#include "XYZ.h";
+#include "VecLib.h";
 
-import XYZ;
-import VecLib;
-import XorRandom;
-export module Matrix;
-
-export struct Matrix3x3 {
+struct Matrix3x3 {
 public:
     float data[9];
     Matrix3x3() {

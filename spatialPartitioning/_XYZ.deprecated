@@ -1,4 +1,5 @@
-
+/*
+#pragma once
 
 #include <vector>
 #include <string>
@@ -6,18 +7,12 @@
 #include <immintrin.h>
 #include <math.h>
 #include <unordered_set>
-import XorRandom;
 
-export module XYZ;
-
-
-using namespace std;
 
 template <typename T> T sign(T& input) {
     return (T)((input < 0) ? -1 : 1);
 }
-
-export struct XY {
+struct XY {
     float X;
     float Y;
     XY() :X(0), Y(0) {}
@@ -50,13 +45,13 @@ export struct XY {
             return xHash ^ yHash;
         }
     };
-    typedef unordered_set<XY, XY::HashFunction> set;
-    string to_string() const {
+    typedef std::unordered_set<XY, XY::HashFunction> set;
+    std::string to_string() const {
         return "("+std::to_string(X) + "," + std::to_string(Y)+")";
     }
 };
 
-export ostream& operator<<(ostream& stream, const XY& vec2) {
+std::ostream& operator<<(std::ostream& stream, const XY& vec2) {
     stream << vec2.to_string();
     return stream;
 }
@@ -64,7 +59,7 @@ export ostream& operator<<(ostream& stream, const XY& vec2) {
 XY operator*(const float& self, const XY& coord) {
     return coord * self;
 }
-export struct m256_vec2 {
+struct m256_vec2 {
     __m256 X;
     __m256 Y;
     m256_vec2() {};
@@ -72,9 +67,9 @@ export struct m256_vec2 {
         X = _mm256_set1_ps(fill.X);
         Y = _mm256_set1_ps(fill.Y);
     }
-    m256_vec2(vector<XY> input) {
-        vector<float> x_vec;
-        vector<float> y_vec;
+    m256_vec2(std::vector<XY> input) {
+        std::vector<float> x_vec;
+        std::vector<float> y_vec;
         for (int i = 0; i < 8 && i < input.size(); i++) {
             x_vec.push_back(input[i].X);
             y_vec.push_back(input[i].Y);
@@ -93,7 +88,7 @@ export struct m256_vec2 {
     }
 };
 
-export struct XYZ {
+struct XYZ {
 public:
     float X;
     float Y;
@@ -101,10 +96,10 @@ public:
     XYZ() : X(0), Y(0), Z(0) {}
     XYZ(float s) : X(s), Y(s), Z(s) {}
     XYZ(float _X, float _Y, float _Z) : X(_X), Y(_Y), Z(_Z) {}
-    XYZ(vector<double> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
-    XYZ(vector<float> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
-    XYZ(vector<double> attr, vector<char> swizzle) : X(attr[sign(swizzle[0]) * abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
-    XYZ(vector<float> attr, vector<char> swizzle) : X(attr[sign(swizzle[0]) * abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
+    XYZ(std::vector<double> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
+    XYZ(std::vector<float> attr) : X(attr[0]), Y(attr[1]), Z(attr[2]) {}
+    XYZ(std::vector<double> attr, std::vector<char> swizzle) : X(attr[sign(swizzle[0]) * abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
+    XYZ(std::vector<float> attr, std::vector<char> swizzle) : X(attr[sign(swizzle[0]) * abs(swizzle[0])]), Y(sign(swizzle[1])* attr[abs(swizzle[1])]), Z(sign(swizzle[2])* attr[abs(swizzle[2])]) {}
     XYZ(XY xy, float _Z) : X(xy.X), Y(xy.Y), Z(_Z) {}
     XYZ(XY xy) : XYZ(xy, 0) {}
     XYZ clone() {
@@ -121,7 +116,7 @@ public:
         if (n == 1) return Y;
         if (n == 2) return Z;
     }
-    XYZ swizzle(vector<char> swiz) {
+    XYZ swizzle(std::vector<char> swiz) {
         return XYZ(
             sign(swiz[0]) * (*this)[abs(swiz[0])],
             sign(swiz[1]) * (*this)[abs(swiz[1])],
@@ -323,12 +318,12 @@ public:
         return XYZ(-v.X, -v.Y, -v.Z);
     }
    
-    string to_string() {
-        string xstr = std::to_string(X);
+    std::string to_string() {
+        std::string xstr = std::to_string(X);
         xstr = ((X > 0) ? " " : "") + xstr;
-        string ystr = std::to_string(Y);
+        std::string ystr = std::to_string(Y);
         ystr = ((Y > 0) ? " " : "") + ystr;
-        string zstr = std::to_string(Z);
+        std::string zstr = std::to_string(Z);
         zstr = ((Z > 0) ? " " : "") + zstr;
         return "(" + xstr + "," + ystr + "," + zstr + ")";
     }
@@ -435,39 +430,39 @@ public:
     struct Z_t;
 };
 
-export XYZ operator*(const float& self, const XYZ& point) {
+XYZ operator*(const float& self, const XYZ& point) {
     return point * self;
 }
-export XYZ operator-(const float& self, const XYZ& point) {
+XYZ operator-(const float& self, const XYZ& point) {
     return point + self;
 }
-export XYZ operator/(const float& self, const XYZ& point) {
+XYZ operator/(const float& self, const XYZ& point) {
     return XYZ::divide(self, point);
 }
 
-export std::ostream& operator<<(std::ostream& os, XYZ& m) {
+std::ostream& operator<<(std::ostream& os, XYZ& m) {
     return os << m.to_string();
 }
 
-export struct XYZ::X_t : XYZ {
+struct XYZ::X_t : XYZ {
     float v() {
         return X;
     }
 };
 
-export struct XYZ::Y_t : XYZ {
+struct XYZ::Y_t : XYZ {
     float v() {
         return Y;
     }
 };
 
-export struct XYZ::Z_t : XYZ {
+struct XYZ::Z_t : XYZ {
     float v() {
         return Z;
     }
 };
 
-export struct m256_vec3 {
+struct m256_vec3 {
     __m256 X;
     __m256 Y;
     __m256 Z;
@@ -477,10 +472,10 @@ export struct m256_vec3 {
         Y = _mm256_set1_ps(fill.Y);
         Z = _mm256_set1_ps(fill.Z);
     }
-    m256_vec3(vector<XYZ> input) {
-        vector<float> x_vec;
-        vector<float> y_vec;
-        vector<float> z_vec;
+    m256_vec3(std::vector<XYZ> input) {
+        std::vector<float> x_vec;
+        std::vector<float> y_vec;
+        std::vector<float> z_vec;
         for (int i = 0; i < 8 && i < input.size(); i++) {
             x_vec.push_back(input[i].X);
             y_vec.push_back(input[i].Y);
@@ -513,16 +508,16 @@ export struct m256_vec3 {
     }
 };
 
-export struct Quat : public XYZ {
+struct Quat : public XYZ {
     float W;
     Quat() : XYZ(), W(0) {}
     Quat(XYZ _XYZ, float _W) : XYZ(_XYZ), W(_W) {}
     Quat(float _X, float _Y, float _Z) : XYZ(_X, _Y, _Z), W(0) {}
     Quat(float _X, float _Y, float _Z, float _W) : XYZ(_X, _Y, _Z), W(_W) {}
-    Quat(vector<float> attr) : XYZ(attr), W(attr[3]) {}
-    Quat(vector<double> attr) : XYZ(attr), W(attr[3]) {}
-    Quat(vector<float> attr, vector<char> swizzle) : XYZ(attr, swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
-    Quat(vector<double> attr, vector<char> swizzle) : XYZ(attr, swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
+    Quat(std::vector<float> attr) : XYZ(attr), W(attr[3]) {}
+    Quat(std::vector<double> attr) : XYZ(attr), W(attr[3]) {}
+    Quat(std::vector<float> attr,  std::vector<char> swizzle) : XYZ(attr, swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
+    Quat(std::vector<double> attr, std::vector<char> swizzle) : XYZ(attr, swizzle), W(sign(swizzle[3])* attr[abs(swizzle[3])]) {}
     Quat clone() {
         return Quat(X, Y, Z, W);
     }
@@ -604,7 +599,7 @@ export struct Quat : public XYZ {
     }
 };
 
-export struct iXY {
+struct iXY {
     int X;
     int Y;
     iXY() :X(0), Y(0) {}
@@ -630,5 +625,6 @@ export struct iXY {
             return xHash ^ yHash;
         }
     };
-    typedef unordered_set<iXY, iXY::HashFunction> set;
+    typedef std::unordered_set<iXY, iXY::HashFunction> set;
 };
+*/

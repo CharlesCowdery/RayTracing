@@ -15,22 +15,40 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="spatialPartitioning.cpp">
+    <ClCompile Include="Main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="XYZ.ixx">
+    <ClCompile Include="_XYZ.deprecated">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="XorRandom.ixx">
+    <ClCompile Include="Materials.h">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Materials.ixx">
+    <ClCompile Include="Matrix.h">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Matrix.ixx">
+    <ClCompile Include="VecLib.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="VecLib.ixx">
+    <ClCompile Include="XYZ.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="VecLib.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
+    <ClCompile Include="XorRandom.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Coredefs.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Coredefs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="XorRandom.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
+    <ClCompile Include="commons.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -38,10 +56,49 @@
     <ClInclude Include="json.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="common.h">
+    <ClInclude Include="Primitives.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="Structures.h">
+    <ClInclude Include="Transformation.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="BVH.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Camera.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Scene.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Core.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Ray.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FileLoading.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SceneManager.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GUI.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ImageProcessing.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="XYZ.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Config.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="commons.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Texture.h">
       <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
