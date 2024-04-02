@@ -181,25 +181,12 @@
     <ClCompile Include="spatialPartitioning.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\openal32.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-audio-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-audio-d-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-graphics-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-graphics-d-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-network-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-network-d-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-system-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-system-d-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-window-2.dll" />
-    <None Include="..\..\..\..\Libraries\C++ 17\SFML-2.6.0\bin\sfml-window-d-2.dll" />
+    <ClInclude Include="common.h" />
+    <ClInclude Include="Structures.h" />
+    <ClInclude Include="json.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\..\..\Downloads\simd_bitonic.h" />
-    <ClInclude Include="common.h" />
-    <ClInclude Include="json.hpp" />
-    <ClInclude Include="stb_image.h" />
-    <ClInclude Include="stb_image_write.h" />
-    <ClInclude Include="tiny_gltf.h" />
+    <Text Include="Addon.py" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

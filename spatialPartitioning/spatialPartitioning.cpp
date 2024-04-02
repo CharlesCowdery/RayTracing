@@ -28,23 +28,21 @@ namespace OCIO = OCIO_NAMESPACE;
 #include <queue>
 #include <processthreadsapi.h>
 
-#define TINYGLTF_IMPLEMENTATION
+#include <cassert>
+#include <immintrin.h>
 
+#define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-#include <cassert>
-#include <immintrin.h>
-
-#define __SIMD_BITONIC_IMPLEMENTATION__
-#include "simd_bitonic.h"
-
-#include <boost/array.hpp>
-#include <boost/asio.hpp>
+//#include "imgui-master/imgui.h"
+//#include "imgui-master/backends/imgui_impl_win32.h"
+//#include "imgui-master/backends/imgui_impl_dx12.h"
 
 import XYZ;
 import XorRandom;
@@ -82,7 +80,7 @@ import Materials;
 
 #define DRAW_LIGHTS   (1 && !DRAW_REFLECTIVE_COEFFICIENTS && !DRAW_DIFFUSE_COEFFICIENTS)
 #define DRAW_DIFFUSE  (1 && !DRAW_REFLECTIVE_COEFFICIENTS)
-#define DRAW_SPECULAR (1 && !DRAW_DIFFUSE_COEFFICIENTS)
+#define DRAW_SPECULAR (0 && !DRAW_DIFFUSE_COEFFICIENTS)
 
 #define USE_ADVANCED_BVH false
 
@@ -105,7 +103,6 @@ import Materials;
 
 
 using namespace std;
-using boost::asio::ip::tcp;
 using time_point = chrono::steady_clock::time_point;
 
 
@@ -1706,6 +1703,7 @@ private:
 int total_tris = 0;
 int nodes_traversed = 0;
 
+#define IOR_STACK_SIZE 5
 
 struct PackagedRay {
     XYZ position;
@@ -1713,6 +1711,7 @@ struct PackagedRay {
     char generation = 0;
     XYZ* output;
     XYZ coefficient;
+    Material* IOR_stack[IOR_STACK_SIZE];
     PackagedRay() {};
     PackagedRay(XYZ _position, XYZ _slope, char gen) :
         position(_position),
@@ -2626,66 +2625,63 @@ public:
     }
     XYZ process_ray(Casting_Diagnostics& stats, PackagedRay& ray_data) {
         stats.rays_processed++;
-        //cout << out;
-        //string out ="vector(" + ray_data.position.to_string() + "," +(ray_data.position + ray_data.slope).to_string()  +"),";
+
         XYZ orig = ray_data.position;
         CastResults results = execute_ray_cast(ray_data.position, ray_data.slope);
         PackagedTri& Tri = data->tri_data[results.tri_index];
         results.texUV.X = results.TUV.Y * Tri.U_delta.X + results.TUV.Z * Tri.V_delta.X + Tri.UV_basis.X;
         results.texUV.Y = results.TUV.Y * Tri.U_delta.Y + results.TUV.Z * Tri.V_delta.Y + Tri.UV_basis.Y;
-        //results.normal = -results.normal;
-        //*ray_data.output += ray_data.coefficient * ((results.normal)+1)/2;
+
         if (results.material == nullptr) {
             return XYZ(0);
         }
         MaterialSample material = results.material->sample_UV(results.texUV.X, results.texUV.Y);
         XYZ aggregate = XYZ();
         XYZ normal = Tri::get_normal(Tri.get_normal(results.TUV.Y,results.TUV.Z),orig-Tri.origin_offset);
-        if (!XYZ::equals(XYZ(0, 0, 0), material.normal)) {
+        if (!XYZ::equals(XYZ(0, 0, 0), material.normalPertubation)) {
             XYZ T  = Tri.get_tangent(results.TUV.Y,results.TUV.Z);
             XYZ BT = Tri.get_bitangent(results.TUV.Y, results.TUV.Z);
-            normal = material.normal.X * T + material.normal.Y * BT + material.normal.Z * normal;
+            normal = material.normalPertubation.X * T + material.normalPertubation.Y * BT + material.normalPertubation.Z * normal;
 
         }
-        if (DRAW_UV) {
-            if (results.TUV.X != -1) {
-                XYZ color;
-                color.X = results.texUV.X;
-                color.Y = results.texUV.Y;
-                color.Z = 1 - color.X - color.Y;
-                return color * 1;
+        normal = XYZ::normalize(normal);
+        {
+            if (DRAW_UV) {
+                if (results.TUV.X != -1) {
+                    XYZ color;
+                    color.X = results.texUV.X;
+                    color.Y = results.texUV.Y;
+                    color.Z = 1 - color.X - color.Y;
+                    return color * 1;
+                }
             }
-        }
-        if (DRAW_NORMAL) {
-            XYZ res = (normal);
-            return (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
+            if (DRAW_NORMAL) {
+                XYZ res = (normal);
+                return (normal / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
 
-        }
-        if (DRAW_NORMAL_DELTAS) {
-            XYZ res = (results.normal - normal);
-            if (res.magnitude() < 0.1) {
-                return XYZ(0, 0, 0);
             }
-            return (XYZ::normalize(res) / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
+            if (DRAW_NORMAL_DELTAS) {
+                XYZ res = (results.normal - normal);
+                if (res.magnitude() < 0.1) {
+                    return XYZ(0, 0, 0);
+                }
+                return (XYZ::normalize(res) / 2 + XYZ(0.5, 0.5, 0.5)) * 1;
 
+            }
+            if (DRAW_NORMAL_FACING) return XYZ::dot(normal, orig) / abs(XYZ::dot(normal, orig));
+            if (DRAW_COLOR) return material.color;
+            if (false) {
+                if (ray_data.generation == 1)
+                    aggregate += ray_data.position / 2 + XYZ(0.5, 0.5, 0.5);
+            }
+            //if (DRAW_EMISSIVE) return material.calculate_emissions();
         }
-        if (DRAW_NORMAL_FACING) return XYZ::dot(normal, orig) / abs(XYZ::dot(normal, orig));
-        if (DRAW_COLOR) return material.color;
-        if (false) {
-            if (ray_data.generation == 1)
-            aggregate += ray_data.position / 2 + XYZ(0.5,0.5,0.5);
-        }
-        //if (DRAW_EMISSIVE) return material.calculate_emissions();
-
 
         aggregate += material.calculate_emissions();
 
         int bounce_count = data->monte_carlo_max * pow(data->monte_carlo_modifier, ray_data.generation);
         XYZ flipped_output = XYZ::flip(ray_data.slope);
-        XYZ reflection_slope = XYZ::reflect(XYZ::flip(ray_data.slope), normal);
-
-        normal = XYZ::normalize(normal);
-        reflection_slope = XYZ::normalize(reflection_slope);
+        XYZ reflection_slope = XYZ::normalize(XYZ::reflect(XYZ::flip(ray_data.slope), normal));
 
         Quat normal_rot = Quat::makeRotationFromY(normal);
         Quat reflection_rot = Quat::makeRotationFromY(reflection_slope);
@@ -2693,14 +2689,15 @@ public:
         Matrix3x3 reflection_rot_m = Matrix3x3::quatToMatrix(reflection_rot);
         //ray_data.PreLL.value = XYZ(0, 0, 100);
 
-
-        if (ray_data.generation >= data->max_generations) return aggregate;
+        float dot_NO = XYZ::dot(normal, flipped_output);
+        material.config(flipped_output, normal, 1.0003, material.IOR);
 
 #if DRAW_LIGHTS
         for (Light* L : data->lights) {
             XYZ pos = ray_data.position + 0.001 * results.normal;
             XYZ slope = L->vectorTo(pos);
-            XYZ return_coefficient = material.fast_BRDF_co(normal, slope, flipped_output);
+            material.set_input(slope);
+            XYZ return_coefficient = material.fast_BRDF_co(true);
             if (execute_lighting_cast(pos, L)) {
                 aggregate += return_coefficient * L->emission;
 #if DRAW_LIGHT_EXPOSURE
@@ -2712,14 +2709,14 @@ public:
 #endif
         }
 #endif
-
+        if (ray_data.generation >= data->max_generations) return aggregate;
         if (ray_data.generation < data->monte_carlo_generations) {
 
 
             //int diffuse_bounces = bounce_count;
             //int specular_bounces = 0;
-            int diffuse_bounces  = bounce_count * material.diff_f;
-            int specular_bounces = bounce_count * material.spec_f;
+            int diffuse_bounces  = bounce_count * material.f_diff;
+            int specular_bounces = bounce_count * material.f_spec;
 #if !DRAW_DIFFUSE
             diffuse_bounces = 0;
             specular_bounces = bounce_count;
@@ -2773,7 +2770,8 @@ public:
                 }
 
                 //XYZ return_coefficient = ray_data.coefficient * material.fast_BRDF_co(normal, diffuse_slope, flipped_output);
-                XYZ return_coefficient = material.diffuse_BRDF(XYZ::dot(normal, diffuse_slope));
+                material.set_input(diffuse_slope);
+                XYZ return_coefficient = material.fast_BRDF_co(false);
 #if DRAW_DIFFUSE_COEFFICIENTS
                 aggregate += return_coefficient * diffuse_multiplier;
                 continue;
@@ -2804,7 +2802,8 @@ public:
                         specular_slope = reflection_slope;
                     }
                 } while (false);
-                XYZ return_coefficient = material.fast_BRDF_co(normal, specular_slope, flipped_output);
+                material.set_input(specular_slope);
+                XYZ return_coefficient = material.fast_BRDF_co(true);
                 //XYZ return_coefficient = XYZ(1, 1, 1);
 #if DRAW_REFLECTIVE_COEFFICIENTS
                 aggregate += return_coefficient*specular_multiplier;
@@ -2844,7 +2843,8 @@ public:
             }
         }
         else {
-            XYZ return_coefficient = material.fast_BRDF_co(normal, reflection_slope, flipped_output);
+            material.set_input(reflection_slope);
+            XYZ return_coefficient = material.fast_BRDF_co(true);
             
             if (XYZ::equals(return_coefficient, XYZ(0, 0, 0))) {
                 return aggregate;
@@ -3043,7 +3043,7 @@ public:
 };
 namespace ImageHandler {
     OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromFile("C:\\Users\\Charlie\\Libraries\\OCIOConfigs\\AgX-main\\config.ocio");
-    OCIO::ConstProcessorRcPtr processor = config->getProcessor(OCIO::ROLE_SCENE_LINEAR,"AgX Base sRGB");
+    OCIO::ConstProcessorRcPtr processor = config->getProcessor("Linear Rec.709", "AGX Base sRGB");
     auto compute = processor->getDefaultCPUProcessor();
     static decimal luminance(XYZ v)
     {
@@ -3058,13 +3058,18 @@ namespace ImageHandler {
 
     //decimal realistic_response(decimal f, decimal iso) // https://graphics-programming.org/resources/tonemapping/index.html
 
-    XYZ post_process_pixel(XYZ lums) {  //lums is raw light data via RGB
+    static XYZ apply_gamma(XYZ in, float gamma) {
+        float lums = luminance(in);
+        float post_lums = pow(lums, 1.0/gamma);
+        return in * post_lums / lums;
+    }
 
+    XYZ post_process_pixel(XYZ lums) {  //lums is raw light data via RGB
+        lums = apply_gamma(lums, 1);
         float pixel[3] = { lums[0],lums[1],lums[2] };
         compute->applyRGB(pixel);
         lums = XYZ(pixel[0], pixel[1], pixel[2]);
-        float post_lum = pow(luminance(lums),1/2.2);
-        lums = lums * post_lum / luminance(lums);
+        lums = apply_gamma(lums, 2.2);
 
         return XYZ::clamp(lums, 0, 1) * 255;//scale to 24 bit rgb
     }
@@ -3312,12 +3317,6 @@ public:
         //_run_engine(true);
 
     }
-    void spawn_host() {
-        host_loop();
-    }
-    void spawn_slave() {
-        slave_loop();
-    }
     void hold_window() {
         GUI.hold_window();
     }
@@ -3343,71 +3342,6 @@ private:
 
         cout << "Preprocessing done [" << chrono::duration_cast<chrono::milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
 
-    }
-    vector<unsigned char> read_bytes(tcp::socket& socket) {
-        boost::asio::streambuf buf;
-        boost::asio::read_until(socket, buf, "\n");
-        vector<unsigned char> target(buf.size());
-        buffer_copy(boost::asio::buffer(target), buf.data());
-        return target;
-    }
-    void host_loop() {
-        boost::asio::io_context io_context;
-        tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 15413));
-        bool first = 1;
-        while (first) {
-            try {
-                first = 0;
-                cout << "awaiting connection" << endl;
-                tcp::socket socket(io_context);
-                acceptor.accept(socket);
-                Tri test = Tri(XYZ(1, 2, 3), XYZ(2, 3, 4), XYZ(3, 4, 5), new Material());
-                unsigned char* test_char = (unsigned char*)&test;
-                int buffer_size = sizeof(test);
-                auto buffer = boost::asio::buffer(test_char, buffer_size);
-
-                boost::asio::write(socket, buffer);
-
-                vector<unsigned char> message = read_bytes(socket);
-                Tri* test_out = (Tri*)message.data();
-
-                //cout <<"output: " << message << endl;
-            }
-            catch (std::exception const& ex) {
-                cout << ex.what() << endl;
-                exit(0);
-            }
-        }
-    }
-    void slave_loop() {
-        boost::asio::io_context io_context;
-        tcp::resolver resolver(io_context);
-        //tcp::resolver::results_type endpoints =
-        //resolver.resolve(argv[1], "daytime");
-        //bool first = 1;
-        //while (first) {
-        //    try {
-        //        first = 0;
-        //        cout << "awaiting connection" << endl;
-        //        tcp::socket socket(io_context);
-        //        acceptor.accept(socket);
-        //        Tri test = Tri(XYZ(1, 2, 3), XYZ(2, 3, 4), XYZ(3, 4, 5), new Material());
-        //        unsigned char* test_char = (unsigned char*)&test;
-        //        int buffer_size = sizeof(test);
-        //        auto buffer = boost::asio::buffer(test_char, buffer_size);
-        //
-        //        boost::asio::write(socket, buffer);
-        //
-        //        vector<unsigned char> message = read_bytes(socket);
-        //        Tri* test_out = (Tri*)message.data();
-        //
-        //        //cout <<"output: " << message << endl;
-        //    }
-        //    catch (std::exception const& ex) {
-        //        cout << ex.what() << endl;
-        //        exit(0);
-        //    }
-        //}
     }
     void spawn_threads() {
         for (int i = 0; i < thread_count; i++) {
@@ -4093,6 +4027,9 @@ public:
     static XYZ converter_xyz(float x, float y, float z) {
         return XYZ(x, y, z);
     }
+    static XYZ converter_xyz_sRGB(float x, float y, float z) {
+        return ImageHandler::apply_gamma(XYZ(x, y, z),1/2.2);
+    }
     static XYZ converter_xzy(float x, float y, float z) {
         return XYZ(x, z, y);
     }
@@ -4100,7 +4037,7 @@ public:
     class converter_normal_scaler {
     public:
         static XYZ func(float x, float y, float z) {
-            return (XYZ::normalize(XYZ(x, y, z)) * 2 - 1) * XYZ(scale, scale, 1.0);
+            return (XYZ::normalize(XYZ(x, y, z)) * 2 - 1) * XYZ(scale, scale, 1/2.2);
         }
     
     };
@@ -4194,12 +4131,12 @@ public:
             mat->color.set_static(XYZ(pbr.baseColorFactor));
             mat->metallic.set_static(pbr.metallicFactor);
             mat->roughness.set_static(pbr.roughnessFactor);
-            mat->emissive.set_static(XYZ(emissive) * 7.5);
+            mat->emissive.set_static(XYZ(emissive) * 25);
 
             if (pbr.baseColorTexture.index != -1) {
                 int t_index = pbr.baseColorTexture.index;
                 mat->UV_map_index = pbr.baseColorTexture.texCoord;
-                Texture<XYZ>* tex = loadTexture<XYZ>(data, t_index, converter_xyz);
+                Texture<XYZ>* tex = loadTexture<XYZ>(data, t_index, converter_xyz_sRGB);
                 auto transform_data = fetch_transform(pbr.baseColorTexture);
                 tex->set_transform(transform_data.first, transform_data.second);
                 mat->color.set_texture(tex);
@@ -4215,7 +4152,7 @@ public:
                 auto transform_data = fetch_transform(pbr.metallicRoughnessTexture);
                 tex->set_transform(transform_data.first, transform_data.second);
 
-                Texture<float>* metallic = tex->export_channel(0);
+                Texture<float>* metallic = tex->export_channel(2);
                 Texture<float>* roughness = tex->export_channel(1);
                 
 
@@ -4271,7 +4208,18 @@ public:
                 }
             }
             else {
-                mat->specular = 0.5;
+                mat->specular = 1;
+            }
+            if (material_data.extensions.count("KHR_materials_ior")) {
+                auto ior_iterator = material_data.extensions.find("KHR_materials_ior");
+                if (ior_iterator != material_data.extensions.end()) {
+                    auto ior_value = ior_iterator->second.Get("ior");
+                    auto ior = ior_value.GetNumberAsDouble();
+                    mat->IOR.set_static(ior);
+                }
+            }
+            else {
+                mat->IOR = 1.5;
             }
             materials.push_back(mat);
         }
@@ -4466,8 +4414,6 @@ public:
 
 };
 
-
-
 int main(int argc, char* argv[])
 {
     srand(0);
@@ -4497,7 +4443,7 @@ int main(int argc, char* argv[])
     string host_port = "15413";
     string matcher_ip = "";
     string matcher_port = "15413";
-    int scalar = 1;
+    int scalar = 2;
     int resolution_x = 1080/scalar;
     int resolution_y = 1080/scalar;
     int subdivisions = 1;
@@ -4526,13 +4472,6 @@ int main(int argc, char* argv[])
         scene_manager->render(resolution_x, resolution_y, subdivisions, 1);
         scene_manager->hold_window();
         break;
-    case 1:
-        scene_manager = FileManager::loadGLTFFile(fpath);
-        scene_manager->spawn_host();
-        scene_manager->hold_window();
-        break;
-        //case 2:
-            //scene_manager->spawn_slave();
     }
 
 
