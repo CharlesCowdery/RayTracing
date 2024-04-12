@@ -12,6 +12,8 @@
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
 - Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/) and [(Heitz)](https://inria.hal.science/hal-00942452v1/document).
+  - Specularity determined by IOR via the Microfacet BRDF
+  - Utilizes the Oren-Nayar diffuse equation.
 - Full material texturing support, including normal mapping.
 - Vertex smoothing/smooth shading.
 - Direct light sampling for all puctual light types.
