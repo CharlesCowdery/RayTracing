@@ -21,5 +21,5 @@ struct Casting_Diagnostics {
     long shadows_cast = 0;
     long diffuses_cast = 0;
     long long rays_processed = 0;
-    chrono::nanoseconds duration;
+    std::chrono::nanoseconds duration;
 };

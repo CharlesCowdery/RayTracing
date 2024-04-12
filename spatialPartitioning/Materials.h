@@ -6,8 +6,8 @@
 #include <assert.h>
 #include "Matrix.h";
 #include "Texture.h"
+#include "commons.h"
 
-using namespace std;
 
 class MaterialSample {
 public:
@@ -22,6 +22,8 @@ public:
 
     XYZ normal = normal;
     XYZ out;
+    XYZ in;
+    XYZ half;
 
     float n1;
     float n2;
@@ -35,6 +37,7 @@ public:
     XYZ albedo;
 
     float k = 0;
+    float a = 0;
     float a_2 = 0;
     float f_spec = 0;
     float f_diff = 0;
@@ -55,8 +58,13 @@ public:
 
     float dot_AD; //azimuth delta dot
 
+    bool use_fresnel = true;
+
     MaterialSample(XYZ _color, float _roughness, float _metallic, float _specular, float _transmission, float _IOR, XYZ _emissive, XYZ _normal) {
         color = _color;
+        if (isnan(color.X)) {
+            throw std::exception();
+        }
         roughness = _roughness;
         metallic = _metallic;
         specularFactor = _specular;
@@ -69,13 +77,13 @@ public:
         out = _out;
         normal = _normal;
 
-        dot_NO = XYZ::dot(out,normal); //might not be a bad idea to use avx here
+        dot_NO = std::min(XYZ::dot(out,normal),1.0f); //might not be a bad idea to use avx here
 
         n1 = _n1;
         n2 = _n2;
 
-        i_metal = 0.9*metallic;             //interpolate metallic for fresnel curve
-        i_roughness = roughness*0.01 + 0.999;  //interpolate roughness to conform to "normal" values
+        i_metal = 1*metallic;             //interpolate metallic for fresnel curve
+        i_roughness = roughness*0.999 + 0.001;  //interpolate roughness to conform to "normal" values
 
         sigma = roughness * 0.3;
 
@@ -85,8 +93,10 @@ public:
         R0C = get_R0C(); //fresnel 0 with color
 
         //k = pow(i_roughness + 1, 2) / 8;
+        
         k = i_roughness * i_roughness / 2;
-        a_2 = i_roughness * i_roughness;
+        a = i_roughness;
+        a_2 = a*a;
 
         f_spec = get_specular_factor();
         f_diff = get_diffuse_factor();
@@ -97,13 +107,15 @@ public:
         float r_f = roughness - 0.2;
         diff_spread = (r_f * r_f) * PI / 2;
     }
-    void set_input(XYZ in) {
-        XYZ half = XYZ::normalize((out + in) / 2);
+    void set_input(XYZ _in) {
+        in = _in;
+        half = XYZ::normalize((out + in) / 2);
 
-        dot_NI = XYZ::dot(in, normal);
-        dot_NH = XYZ::dot(half, normal);
-        dot_HI = XYZ::dot(half, in);
-        dot_HO = XYZ::dot(half, out);
+
+        dot_NI = std::min(1.0f,XYZ::dot(in, normal));
+        dot_NH = std::min(1.0f,XYZ::dot(half, normal));
+        dot_HI = std::min(1.0f,XYZ::dot(half, in));
+        dot_HO = std::min(1.0f,XYZ::dot(half, out));
 
         Ti = acos(dot_NI);
 
@@ -114,7 +126,7 @@ public:
     }
     float get_R0() {
         float spec = pow((n1 - n2) / (n1 + n2), 2);
-        return (1 - i_metal) * spec + i_metal;
+        return ((1 - i_metal) * spec + i_metal);
     }
     XYZ get_R0C() {
         return XYZ::linear_mix(metallic, XYZ(R0), color);
@@ -146,14 +158,17 @@ public:
         float g = 1 - dot_NI;
         return R0C + (1 - R0C) * (g * g * g * g * g);
     }
+    float fast_fresnel(XYZ normal, XYZ vector) const{
+        float g = 1 - XYZ::dot(normal,vector);
+        return R0 + (1 - R0) * (g * g * g * g * g);
+    }
     float get_normal_distribution_GGXTR(const XYZ& normal, const XYZ& half_vector) const {
-        float a = i_roughness;
         float dot = XYZ::dot(normal, half_vector);
         float final = (a * a)
             /
             (PI * pow((dot * dot) * (a * a - 1) + 1, 2));
 
-        return final;
+        return final;   
     }
     float normal_dist_ggx() const {
         float c = dot_NH;
@@ -161,7 +176,6 @@ public:
         return pow(1 + pow(s / c, 2) / a_2, -2);
     }
     float fast_normal_dist(const float dot_NH) const {
-        float a_2 = i_roughness * i_roughness;
         float g = dot_NH * dot_NH * (a_2 - 1) + 1;
         return dot_NH * (a_2) / (PI * g * g);
     }
@@ -173,13 +187,22 @@ public:
         //return 1;
 
     }
-    float G1(float dot) const {
+    float unkownG1(float dot) const {
         float c = dot;
         float s = sqrt(1 - dot * dot);
         return (-1 + sqrt(1 + a_2 * a_2 * pow(s / c, 2))) / 2;
     }
+    float G1(const XYZ& vec) const { //https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf pg 7
+        float c = std::min(XYZ::dot(vec, normal),0.99f);
+        float s = sqrt(1 - c * c);
+        float _a = 1/(a * s / c);
+        float v = (3.535 * _a + 2.181 * _a * _a) / (1 + 2.276 * _a + 2.577 * _a * _a);
+        if (_a < 1.6) return v;
+        else return 1;
+    }
     float G_GGX() const {
-        return 1 / (1 + G1(dot_NO) + G1(dot_NI));
+        return G1(out) * G1(in);
+        //return 1 / (1 + G1(dot_HO) + G1(dot_HI));
     }
     float fastGeo_both(const float dot_NO, const float dot_NI) const {
         return dot_NO / (dot_NO * (1 - k) + k) * dot_NI / (dot_NI * (1 - k) + k);
@@ -191,20 +214,19 @@ public:
         float s = sigma;
         float s_2 = sigma * sigma;
 
-        float a = max(Ti, To);
-        float b = min(Ti, To);
+        float a = std::max(Ti, To);
+        float b = std::min(Ti, To);
 
         float A = 1 - 0.5 * s_2 / (s_2 + 0.33);
         float B = 0.45 * s_2 / (s_2 + 0.09) * (sin(a) - ((dot_AD >= 0) ? pow(2 * b / PI, 3) : 0));
         float C = 0.125 * s_2 / (s_2 + 0.09) * pow(4 * a * b / PI, 2);
 
         XYZ modifier = color / PI;
-        float L1 = (A + B * max(0.0f, dot_AD) * tan(b) + C * (1 - abs(dot_AD)) * tan((a + b) / 2));
+        float L1 = (A + B * std::max(0.0f, dot_AD) * tan(b) + C * (1 - abs(dot_AD)) * tan((a + b) / 2));
         float L2 = 0.17 * s_2 / (s_2 + 0.13) * (1 - dot_AD) * pow(2 * b / PI, 2);
 
         XYZ final = modifier * L1 + color * modifier * L2;
-        //return get_diffuse_factor_v2(dot_NI) * get_diffuse_reflectance();
-        return get_diffuse_reflectance();
+        return final;
     }
     XYZ diffuse_BRDF() const {
         return oren_nayar_diffuse_BRDF();
@@ -212,12 +234,18 @@ public:
     }
     XYZ specular_BRDF() const {
         if (dot_NH < 0 || dot_NO < 0 || dot_NI < 0 || dot_HI < 0 || dot_HO < 0) return XYZ(0, 0, 0);
-        XYZ fresnel = fast_fresnel(dot_HO);
+        XYZ fresnel = (R0C*(!use_fresnel)) + use_fresnel * fast_fresnel(dot_HO);
         float geo = G_GGX();
         float normal_dist = normal_dist_ggx();//fast_normal_dist(dot_NH);
         float divisor = 4 * dot_NO * dot_NI;
 
         return geo * normal_dist * fresnel / divisor;// / divisor;
+    }
+    XYZ PDF_specular_BRDF() const {
+        if (dot_NH < 0 || dot_NO < 0 || dot_NI < 0 || dot_HI < 0 || dot_HO < 0) return XYZ(0, 0, 0);
+        XYZ tint = XYZ::linear_mix(metallic, XYZ(1, 1, 1), color);
+        XYZ weight = G_GGX()/G1(in);
+        return tint * weight;
     }
     XYZ fast_BRDF_co(bool apply_scalar) const {
         XYZ specular_return = specular_BRDF();
@@ -226,6 +254,13 @@ public:
 
         return (specular_return+diffuse_return) * ((apply_scalar)?dot_NI:1);
 
+    }
+    XYZ PDF_BRDF() const{
+        XYZ specular_return = PDF_specular_BRDF();
+        XYZ light_remainder = XYZ(1) - specular_return;
+        XYZ diffuse_return = light_remainder * diffuse_BRDF();
+
+        return (specular_return + diffuse_return);
     }
     XYZ random_bounce(XorGen& G, const Matrix3x3& diffuse_rotation, const Matrix3x3& reflection_rotation) const {
         float prob = G.fRand(0, 1);
@@ -268,6 +303,8 @@ public:
     Parameter<float> transmission = Parameter<float>(0.);
     Parameter<float> IOR          = Parameter<float>(1);
     Parameter<float> alpha        = Parameter<float>(1);
+
+    std::string name;
 
     int UV_map_index = 0;
     bool use_normals = false;

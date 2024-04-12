@@ -32,12 +32,10 @@
 //#include "imgui-master/backends/imgui_impl_win32.h"
 //#include "imgui-master/backends/imgui_impl_dx12.h"
 
-
-using namespace std;
-
 #include "commons.h"
 #include "SceneManager.h"
 #include "FileLoading.h"
+//#include "imgui_gui_maker.h"
 
 /*Xorshiro256+ pseudorandom end*/
 

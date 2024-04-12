@@ -6,6 +6,10 @@
 #include <math.h>
 #include "Coredefs.h"
 
+using std::pair;
+using std::exception;
+using std::string;
+
 class Primitive {
 public:
     Material* material;

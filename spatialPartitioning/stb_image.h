@@ -124,6 +124,8 @@ RECENT REVISION HISTORY:
   of the credits.
 */
 
+
+
 #ifndef STBI_INCLUDE_STB_IMAGE_H
 #define STBI_INCLUDE_STB_IMAGE_H
 

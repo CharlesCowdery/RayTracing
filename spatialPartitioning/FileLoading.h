@@ -12,12 +12,13 @@
 #define TINYGLTF_IMPLEMENTATION
 #include "tiny_gltf.h"
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
+using std::ofstream;
+using std::ios;
+using std::ifstream;
+using std::iostream;
+using std::vector;
+using std::is_same;
 
 class FileManager {
 public:
@@ -177,8 +178,8 @@ public:
 
     }
     template<typename T> struct iterator_pair {
-        _Vector_iterator<_Vector_val<_Simple_types<T>>> begin;
-        _Vector_iterator<_Vector_val<_Simple_types<T>>> end;
+        std::_Vector_iterator<std::_Vector_val<std::_Simple_types<T>>> begin;
+        std::_Vector_iterator<std::_Vector_val<std::_Simple_types<T>>> end;
         T* begin_ptr;
         iterator_pair() {}
     };
@@ -418,6 +419,11 @@ public:
             mat->roughness.set_static(pbr.roughnessFactor);
             mat->emissive.set_static(XYZ(emissive) * 25);
 
+            mat->name = name;
+            if (name == "PLATES_Mat") {
+                cout << "debugging";
+            }
+
             if (pbr.baseColorTexture.index != -1) {
                 int t_index = pbr.baseColorTexture.index;
                 mat->UV_map_index = pbr.baseColorTexture.texCoord;
@@ -425,6 +431,7 @@ public:
                 auto transform_data = fetch_transform(pbr.baseColorTexture);
                 tex->set_transform(transform_data.first, transform_data.second);
                 mat->color.set_texture(tex);
+                
             }
             if (pbr.metallicRoughnessTexture.index != -1) {
                 int t_index = pbr.metallicRoughnessTexture.index;
@@ -536,8 +543,11 @@ public:
                 vector<XYZ> position_data;
                 buf_accessor.get_vec3_data(position_accessor_index, position_data);
 
+                bool UV_mapped = texcoord_accessor_index != 0;
                 vector<XY> texcoord_data;
-                buf_accessor.get_vec2_data(texcoord_accessor_index, texcoord_data);
+                if (UV_mapped) {
+                    buf_accessor.get_vec2_data(texcoord_accessor_index, texcoord_data);
+                }
 
                 bool smooth_shading = normal_accessor_index != 0;
                 smooth_shading &= 1;
@@ -573,9 +583,14 @@ public:
                     XYZ v1 = position_data[look_1].swizzle(swizzle);
                     XYZ v2 = position_data[look_2].swizzle(swizzle);
                     XYZ v3 = position_data[look_3].swizzle(swizzle);
-                    XY uv1 = XY(0, 1) - XY(-1, 1) * texcoord_data[look_1];
-                    XY uv2 = XY(0, 1) - XY(-1, 1) * texcoord_data[look_2];
-                    XY uv3 = XY(0, 1) - XY(-1, 1) * texcoord_data[look_3];
+                    XY uv1 = 0;
+                    XY uv2 = 0;
+                    XY uv3 = 0;
+                    if (UV_mapped) {
+                        uv1 = XY(0, 1) - XY(-1, 1) * texcoord_data[look_1];
+                        uv2 = XY(0, 1) - XY(-1, 1) * texcoord_data[look_2];
+                        uv3 = XY(0, 1) - XY(-1, 1) * texcoord_data[look_3];
+                    }
 
                     //cout << v1 << " " << v2 << " " << v3 << " " << uv1 << " " << uv2 << " " << uv3 << endl;
                     Tri T = Tri(v1, v2, v3, uv1, uv2, uv3, mat);

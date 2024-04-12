@@ -6,6 +6,13 @@
 #include "commons.h"
 #include <string>
 
+
+using std::string;
+using std::max;
+using std::min;
+using namespace std::chrono;
+
+
 const __m256 AVX_ZEROS = _mm256_set1_ps(0);
 float float_one = *((float*)&one);
 const __m256 AVX_FINT_ONES = _mm256_set1_ps(float_one);

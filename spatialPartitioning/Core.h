@@ -4,7 +4,7 @@
 #include "Scene.h"
 #include "Ray.h"
 #include "Coredefs.h"
-
+#include "PDF.h"
 
 
 class RayEngine {
@@ -331,8 +331,10 @@ public:
         }
         MaterialSample material = results.material->sample_UV(results.texUV.X, results.texUV.Y);
         XYZ aggregate = XYZ();
-        XYZ normal = Tri::get_normal(Tri.get_normal(results.TUV.Y, results.TUV.Z), orig - Tri.origin_offset);
-        if (!XYZ::equals(XYZ(0, 0, 0), material.normalPertubation)) {
+        XYZ geo_normal = Tri::get_normal(Tri.normal, orig - Tri.origin_offset);
+        XYZ smoothed_normal_raw = Tri.get_normal(results.TUV.Y, results.TUV.Z);
+        XYZ normal = (XYZ::dot(geo_normal, smoothed_normal_raw) < 0)? -smoothed_normal_raw : smoothed_normal_raw;
+        if (results.material->use_normals) {
             XYZ T = Tri.get_tangent(results.TUV.Y, results.TUV.Z);
             XYZ BT = Tri.get_bitangent(results.TUV.Y, results.TUV.Z);
             normal = material.normalPertubation.X * T + material.normalPertubation.Y * BT + material.normalPertubation.Z * normal;
@@ -407,10 +409,14 @@ public:
         if (ray_data.generation < data->monte_carlo_generations) {
 
 
-            //int diffuse_bounces = bounce_count;
-            //int specular_bounces = 0;
-            int diffuse_bounces = bounce_count * material.f_diff;
-            int specular_bounces = bounce_count * material.f_spec;
+            int diffuse_bounces = bounce_count;
+            int specular_bounces = 0;
+            for (int i = 0; i < bounce_count; i++) {
+                if (gen.fRand(0, 1) > material.f_spec) {
+                    specular_bounces++;
+                    diffuse_bounces--;
+                }
+            }
 #if !DRAW_DIFFUSE
             diffuse_bounces = 0;
             specular_bounces = bounce_count;
@@ -423,7 +429,7 @@ public:
             diffuse_bounces = 0;
             specular_bounces = 0;
 #endif
-            if (diffuse_bounces < 4) diffuse_bounces = 4;
+            if (diffuse_bounces < 4 && diffuse_bounces > 0) diffuse_bounces = 4;
             int diffuse_Vslices = floor(log2(diffuse_bounces) - 1);
             int diffuse_Rslices = floor(diffuse_bounces / diffuse_Vslices);
             diffuse_bounces = diffuse_Vslices * diffuse_Rslices;
@@ -438,7 +444,72 @@ public:
             float diffuse_V_position = 0;
             float diffuse_R_position = 0;
 
+            int ri = 0;
+            if (XYZ::dot(flipped_output, results.normal) < 0) {
+                cout << ">:(";
+            }
+            if (XYZ::dot(flipped_output, normal) < 0) {
+                return aggregate;
+            }
 
+            
+            for (int i = 0; i < bounce_count; i++) {
+                ri++;
+                //if (ri > bounce_count * 10 && i == 0) {
+                //    //cout << "AAA";
+                //}
+                //if (ri > bounce_count * 2) {
+                //    cout << ">:(";
+                //}
+                float factor = gen.fRand(0, 1);
+                float c_theta = PDF::sample(factor, material.i_roughness); //theta of one side of the cavity
+                float azimuth = gen.fRand(0, 2 * PI);
+                XYZ MN_1 = XYZ(sin(c_theta) * cos(azimuth), cos(c_theta), sin(c_theta) * sin(azimuth)); //micro normal 1, and its flipped counterpart
+                MN_1 = Matrix3x3::applyRotationMatrix(MN_1, normal_rot_m);
+                XYZ MN_2 = XYZ::reflect(MN_1, normal);
+                float choice_prob = XYZ::cdot(flipped_output, MN_2) / (XYZ::cdot(flipped_output, MN_1) + XYZ::cdot(flipped_output, MN_2));
+                float choice_factor = gen.fRand(0, 1);
+                XYZ MN = MN_1;
+                if (choice_factor < choice_prob) {
+                    MN = MN_2;
+                }
+                XYZ outgoing;
+                float ref_prob = material.fast_fresnel(MN, flipped_output);
+                float ref_factor = gen.fRand(0, 1);
+                XYZ slope;
+                XYZ return_coefficient;
+                if (ref_factor < ref_prob) {
+                    slope = XYZ::reflect(flipped_output, MN);
+                    material.set_input(slope);
+                    return_coefficient = material.PDF_specular_BRDF() / (float)bounce_count;
+                }
+                else {
+                    slope = material.biased_diffuse_bounce(gen,normal_rot_m);
+                    material.set_input(slope);
+                    return_coefficient = material.diffuse_BRDF() / (float)bounce_count;
+                }
+
+                if (XYZ::dot(slope, geo_normal) < 0 || XYZ::dot(slope, normal) < 0) {
+                    i--;
+                    continue;
+                }
+                if (return_coefficient.X < 0 || return_coefficient.Y < 0 || return_coefficient.Z < 0) {
+                    i--;
+                    continue;
+                    return_coefficient = material.PDF_BRDF() / (float)bounce_count;
+                }
+                auto ray = PackagedRay(
+                    ray_data.position + 0.001 * results.normal,
+                    slope,
+                    ray_data.generation + 1
+                );
+                ray.output = ray_data.output;
+                stats.diffuses_cast++;
+                XYZ returned_light = process_ray(stats, ray);
+                aggregate += return_coefficient * returned_light;
+            }
+
+            /*
             for (int i = 0; i < diffuse_bounces; i++) {
                 if (i % diffuse_Rslices == 0 && i != 0) {
                     diffuse_V_position += diffuse_V_increment;
@@ -496,6 +567,7 @@ public:
                         specular_slope = reflection_slope;
                     }
                 } while (false);
+                material.use_fresnel = false;
                 material.set_input(specular_slope);
                 XYZ return_coefficient = material.fast_BRDF_co(true);
                 //XYZ return_coefficient = XYZ(1, 1, 1);
@@ -506,6 +578,7 @@ public:
 #if DRAW_DOT_RETURNS
 
 #endif
+                
                 //stringstream s;
                 //float f = XYZ::dot(flipped_output, specular_slope);
                 //s << left << setw(10) << ((f>0) ? "+" + to_string(f) : to_string(f)) << flipped_output.to_string() << " " << specular_slope.to_string() << " " << normal.to_string() << " " << endl;
@@ -535,6 +608,7 @@ public:
                 aggregate += return_coefficient * returned_light;
 
             }
+            */
         }
         else {
             material.set_input(reflection_slope);

@@ -4,10 +4,9 @@
 #include <malloc.h>
 #include <immintrin.h>
 #include <math.h>
+#include "commons.h"
 
 #define USE_MORTON 0
-
-using namespace std;
 
 template <typename T>
 class Texture {
@@ -18,7 +17,7 @@ public:
     double V_multiplier;
     XY scale = XY(1, 1);
     XY offset = XY(0, 0);
-    T* data;//was originally a vector, but the red tape surrounding vector made texture loading very slow in debug mode
+    T* data = nullptr;//was originally a vector, but the red tape surrounding vector made texture loading very slow in debug mode
 
 
     Texture() {
@@ -62,7 +61,7 @@ public:
         return rX * rY;
     }
     unsigned int morton_size(unsigned int rX, unsigned rY) {
-        int largest_axis = max(rX, rY);
+        int largest_axis = std::max(rX, rY);
         int power_2_axes = ceil(log2(largest_axis));
         return pow(pow(2, power_2_axes), 2);
     }
@@ -138,10 +137,10 @@ public:
         double x_2 = U_multiplier * U + 0.5 * U_multiplier;
         double y_1 = V_multiplier * V - 0.5 * V_multiplier;
         double y_2 = V_multiplier * V + 0.5 * V_multiplier;
-        int pos_x_1 = max(0, std::min(resolution_x - 1, (int)floor(x_1)));
-        int pos_x_2 = max(0, std::min(resolution_x - 1, (int)floor(x_2)));
-        int pos_y_1 = max(0, std::min(resolution_y - 1, (int)floor(y_1)));
-        int pos_y_2 = max(0, std::min(resolution_y - 1, (int)floor(y_2)));
+        int pos_x_1 = std::max(0, std::min(resolution_x - 1, (int)floor(x_1)));
+        int pos_x_2 = std::max(0, std::min(resolution_x - 1, (int)floor(x_2)));
+        int pos_y_1 = std::max(0, std::min(resolution_y - 1, (int)floor(y_1)));
+        int pos_y_2 = std::max(0, std::min(resolution_y - 1, (int)floor(y_2)));
         T c1 = lookup(pos_x_1, pos_y_1);
         T c2 = lookup(pos_x_2, pos_y_1);
         T c3 = lookup(pos_x_1, pos_y_2);
@@ -173,6 +172,7 @@ public:
         }
     }
     void set_texture(Texture<T>* texture_ptr, bool free = false) {
+        if (texture_ptr == NULL) throw std::exception("Illegal texture address");
         if (texture != nullptr) {
             if (free) {
                 delete texture;
@@ -180,7 +180,7 @@ public:
         }
         texture = texture_ptr;
     }
-    void set_texture(string file_name, bool free = false) {
+    void set_texture(std::string file_name, bool free = false) {
         //set_texture(new XYZTexture(file_name), free);
     }
     T getValue(double U = 0, double V = 0) {

@@ -4,6 +4,10 @@
 #include "XYZ.h"
 #include <chrono>
 
+using namespace std::chrono;
+using std::string;
+using std::to_string;
+
 class GUIHandler {
 public:
     int current_resolution_x = 0;
@@ -36,7 +40,7 @@ public:
     }
 
     void hold_window() {
-        auto frame_time = chrono::high_resolution_clock::now();
+        auto frame_time = high_resolution_clock::now();
         while (window->isOpen())
         {
             sf::Event event;

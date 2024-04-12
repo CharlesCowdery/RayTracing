@@ -4,8 +4,12 @@
 #include "Core.h"
 #include "GUI.h"
 #include "ImageProcessing.h"
+#include "PDF.h"
 
-using namespace std;
+using std::atomic;
+using namespace std::chrono;
+using std::thread;
+using std::wstring;
 
 class RenderThread {
 public:
@@ -92,7 +96,7 @@ public:
         process_info->parent_rays_cast = 0;
         process_info->child_rays_cast = 0;
         process_info->pixels_done = 0;
-        srand(chrono::high_resolution_clock::now().time_since_epoch().count());
+        srand(high_resolution_clock::now().time_since_epoch().count());
         gen.seed(rand(), rand(), rand(), rand());
         PackagedScene* PS = process_info->RE->data;
         while (true) {
@@ -117,7 +121,7 @@ public:
                     }
                 }
             }
-            this_thread::sleep_for(chrono::milliseconds(1));
+            std::this_thread::sleep_for(milliseconds(1));
         }
     }
     void process_linearly() {
@@ -201,7 +205,7 @@ public:
     int y_increment;
     int x_increment;
 
-    chrono::steady_clock::time_point render_start;
+    steady_clock::time_point render_start;
 
     SceneManager(Scene* _scene) : scene(_scene) {}
 
@@ -217,7 +221,7 @@ public:
 
         GUI = GUIHandler(current_resolution_x, current_resolution_y, block_size);
 
-        render_start = chrono::high_resolution_clock::now();
+        render_start = high_resolution_clock::now();
         prep();
         //enqueue_rays();
         GUI.create_window();
@@ -236,7 +240,7 @@ private:
     void prep() {
         cout << endl << "+PREPROCESSING+" << endl;
 
-        auto prep_start = chrono::high_resolution_clock::now();
+        auto prep_start = high_resolution_clock::now();
 
         for (int y = 0; y < current_resolution_y; y++) {
             vector<XYZ*> row;
@@ -247,11 +251,12 @@ private:
         }
 
         scene->prep(current_resolution_x, current_resolution_y, subdivision_count);
+        PDF::prep();
         RE.load_scene(scene->package());
 
-        auto prep_end = chrono::high_resolution_clock::now();
+        auto prep_end = high_resolution_clock::now();
 
-        cout << "Preprocessing done [" << chrono::duration_cast<chrono::milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
+        cout << "Preprocessing done [" << duration_cast<milliseconds>(prep_end - prep_start).count() << "ms]" << endl;
 
     }
     void spawn_threads() {
@@ -268,9 +273,9 @@ private:
         }
     }
     struct render_stats {
-        chrono::steady_clock::time_point start_time;
-        chrono::steady_clock::time_point now;
-        chrono::steady_clock::time_point last_refresh = chrono::high_resolution_clock::now();
+        steady_clock::time_point start_time;
+        steady_clock::time_point now;
+        steady_clock::time_point last_refresh = high_resolution_clock::now();
         long long parent_rays = 0;
         long long child_rays = 0;
         long long parent_rays_last = 0;
@@ -354,7 +359,7 @@ private:
         }
     }
     void manage_threads(render_stats& rStat, vector<RenderThread::block*>& job_stack) {
-        chrono::steady_clock::time_point now = chrono::high_resolution_clock::now();
+        steady_clock::time_point now = high_resolution_clock::now();
         for (int i = 0; i < thread_count; i++) {
             RenderThread* render_thread = threads[i];
             bool is_idle = render_thread->idle.load(std::memory_order_relaxed);
@@ -414,12 +419,12 @@ private:
         }
     }
     void pre_process_stats(render_stats& rStat) {
-        int seconds = chrono::duration_cast<chrono::seconds>(rStat.now - rStat.start_time).count();
+        int seconds = duration_cast<std::chrono::seconds>(rStat.now - rStat.start_time).count();
         int minutes = seconds / 60;
         int hours = minutes / 60;
         seconds %= 60;
         minutes %= 60;
-        int micro_delta = chrono::duration_cast<chrono::microseconds>(rStat.now - rStat.last_refresh).count();
+        int micro_delta = duration_cast<microseconds>(rStat.now - rStat.last_refresh).count();
         int milli_delta = micro_delta / 1000;
         double second_ratio = ((double)1000000) / micro_delta;
 
@@ -446,15 +451,15 @@ private:
         rStat.parent_rays_last = rStat.parent_rays;
         rStat.child_rays_last = rStat.child_rays;
         rStat.percent_last = rStat.percent_done;
-        rStat.last_refresh = chrono::high_resolution_clock::now();
+        rStat.last_refresh = high_resolution_clock::now();
     }
     void display_stats(render_stats& rStat) {
-        int seconds = chrono::duration_cast<chrono::seconds>(rStat.now - rStat.start_time).count();
+        int seconds = duration_cast<std::chrono::seconds>(rStat.now - rStat.start_time).count();
         int minutes = seconds / 60;
         int hours = minutes / 60;
         seconds %= 60;
         minutes %= 60;
-        int micro_delta = chrono::duration_cast<chrono::microseconds>(rStat.now - rStat.last_refresh).count();
+        int micro_delta = duration_cast<std::chrono::microseconds>(rStat.now - rStat.last_refresh).count();
         int milli_delta = micro_delta / 1000;
         double second_ratio = ((double)1000000) / micro_delta;
 
@@ -507,7 +512,7 @@ private:
     }
     void run_threaded_engine(int mode = 0) {
         render_stats rStat(120, 300);
-        rStat.start_time = chrono::high_resolution_clock::now();
+        rStat.start_time = high_resolution_clock::now();
         render_start = rStat.start_time;
         rStat.remaining_threads = thread_count;
         vector<RenderThread::block*> blocks;
@@ -522,9 +527,9 @@ private:
         switch (mode) {
         case 0:
             while (true) {
-                rStat.now = chrono::high_resolution_clock::now();
+                rStat.now = high_resolution_clock::now();
                 manage_threads(rStat, job_stack);
-                if (chrono::duration_cast<chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
+                if (duration_cast<std::chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
                     gather_thread_stats(rStat);
                     get_block_updates(blocks, update_strips);
                     pre_process_stats(rStat);
@@ -542,8 +547,8 @@ private:
             assign_iterative_groups(job_stack);
             start_threads();
             while (true) {
-                rStat.now = chrono::high_resolution_clock::now();
-                if (chrono::duration_cast<chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
+                rStat.now = high_resolution_clock::now();
+                if (duration_cast<std::chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
                     gather_thread_stats(rStat);
                     get_screen_update(blocks);
                     pre_process_stats(rStat);
@@ -558,8 +563,8 @@ private:
             assign_iterative_groups(job_stack);
             start_threads();
             while (true) {
-                rStat.now = chrono::high_resolution_clock::now();
-                if (chrono::duration_cast<chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 64) {
+                rStat.now = high_resolution_clock::now();
+                if (duration_cast<std::chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 64) {
                     halt_threads();
                     gather_thread_stats(rStat);
                     get_screen_update(blocks);
@@ -590,8 +595,8 @@ private:
         refresh_canvas();
         cout << endl;
 
-        auto end_time = chrono::high_resolution_clock::now();
-        double millis = chrono::duration_cast<chrono::milliseconds>(end_time - rStat.start_time).count();
+        auto end_time = high_resolution_clock::now();
+        double millis = duration_cast<std::chrono::milliseconds>(end_time - rStat.start_time).count();
         cout << "Ray Casting Done [" << to_string(millis) << "ms]" << endl;
         //cout << "Approximate speed: " << intToEng((rays_cast / (millis / 1000.0))) << " rays/s";
     }

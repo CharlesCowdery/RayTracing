@@ -7,6 +7,11 @@
 #include <math.h>
 #include <unordered_set>
 
+#define NOMINMAX 1
+
+#undef max
+#undef min
+
 template <typename T> T sign(T& input);
 struct XY;
 std::ostream& operator<<(std::ostream& stream, const XY& vec2);
@@ -90,6 +95,7 @@ public:
     static XYZ slope(const XYZ& point, const XYZ& other);
     static XYZ flip(XYZ point);
     static float dot(XYZ point, XYZ other);
+    static float cdot(XYZ point, XYZ other);
     static float cosine(XYZ point, XYZ other);
     static XYZ pow(XYZ point, float power);
     static XYZ cross(XYZ point, XYZ other);

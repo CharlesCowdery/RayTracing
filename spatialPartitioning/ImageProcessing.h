@@ -24,6 +24,7 @@ namespace ImageHandler {
 
     static XYZ apply_gamma(XYZ in, float gamma) {
         float lums = luminance(in);
+        if (lums == 0) return XYZ(0, 0, 0);
         float post_lums = pow(lums, 1.0 / gamma);
         return in * post_lums / lums;
     }

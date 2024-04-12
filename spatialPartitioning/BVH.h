@@ -6,6 +6,14 @@
 #include "commons.h"
 #include "Primitives.h"
 
+using std::queue;
+using std::set;
+using std::vector;
+using std::exception;
+using std::cout;
+using std::endl;
+using std::pair;
+
 class BVH {
 public:
     XYZ max = XYZ(0, 0, 0);

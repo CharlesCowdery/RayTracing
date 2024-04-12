@@ -10,6 +10,8 @@
 
 #include "XYZ.h"
 
+
+
 template <typename T> T sign(T& input) {
     return (T)((input < 0) ? -1 : 1);
 }
@@ -273,6 +275,9 @@ float XYZ::length(const XYZ& vector) {
     float XYZ::dot(XYZ point, XYZ other) {
     return point.X * other.X + point.Y * other.Y + point.Z * other.Z;
 }
+    float XYZ::cdot(XYZ point, XYZ other) {
+        return std::min(1.0f,std::max(0.0f,point.X * other.X + point.Y * other.Y + point.Z * other.Z));
+    }
     float XYZ::cosine(XYZ point, XYZ other) {
     float result = XYZ::dot(point, other) / (point.magnitude() * other.magnitude());
     return result;
@@ -504,11 +509,7 @@ m256_vec3 m256_vec3::sub_inline(const m256_vec3& v1, const m256_vec3& v2) {
         float l = sqrt(d);
         return in / l;
     }
-    Quat Quat::makeRotation_(const XYZ& start, const XYZ& end) {
-        XYZ a = XYZ::cross(start, end);
-        float theta = acos(XYZ::dot(start, end));
 
-    }
     Quat Quat::makeRotation(const XYZ& up, const XYZ& direction) {
         if (XYZ::equals(direction, up)) {
             return Quat(0, 0, 0, 1);

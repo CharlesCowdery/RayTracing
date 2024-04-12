@@ -1,6 +1,8 @@
 #pragma once
 #include "XYZ.h"
 
+using std::vector;
+
 class Transformation {
 private:
     Quat* rot_transform = nullptr;

@@ -2,11 +2,18 @@
 #include <chrono>
 #include <vector>
 #include <map>
+#include <iostream>
 
 #include "commons.h"
 #include "BVH.h"
 #include "Camera.h"
 
+using namespace std::chrono;
+using std::cout;
+using std::endl;
+using std::flush;
+using std::pair;
+using std::map;
 
 class PackagedScene {
 public:
@@ -16,10 +23,10 @@ public:
     vector<PackagedTri> emissive_tris;
     PackagedBVH* flat_bvh = nullptr;
     vector<BVH_AVX> avx_bvh;
-    short monte_carlo_generations = 2;
+    short monte_carlo_generations = 3;
     short max_generations = 5;
-    short monte_carlo_max = 64;
-    float monte_carlo_modifier = 1.0 / 16;
+    short monte_carlo_max = 32;
+    float monte_carlo_modifier = 1.0 / 4;
 };
 
 class Scene {
@@ -64,7 +71,7 @@ public:
     }
 
     void prep(int res_x, int res_y, int subdiv_count) {
-        auto start = chrono::high_resolution_clock::now();
+        auto start = high_resolution_clock::now();
         cout << padString("[Scene] Prepping", ".", 100) << flush;
         for (Object* O : objects) {
             O->prep();
@@ -73,8 +80,8 @@ public:
         for (Camera* camera : cameras) {
             camera->prep(res_x, res_y, subdiv_count);
         }
-        auto end = chrono::high_resolution_clock::now();
-        cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(end - start).count() << "ms]" << endl;
+        auto end = high_resolution_clock::now();
+        cout << "[Done][" << duration_cast<milliseconds>(end - start).count() << "ms]" << endl;
     }
 
     PackagedScene* package() {
@@ -84,7 +91,7 @@ public:
 
         PackagedScene* PS = new PackagedScene();
 
-        auto data_group_start = chrono::high_resolution_clock::now();
+        auto data_group_start = high_resolution_clock::now();
         cout << padString("[Scene] Regrouping data", ".", 100) << flush;
 
         for (auto O : objects) {
@@ -94,8 +101,8 @@ public:
             PS->lights.push_back(L);
         }
 
-        auto data_group_end = chrono::high_resolution_clock::now();
-        cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(data_group_end - data_group_start).count() << "ms]" << endl;
+        auto data_group_end = high_resolution_clock::now();
+        cout << "[Done][" << duration_cast<milliseconds>(data_group_end - data_group_start).count() << "ms]" << endl;
 
         //for (int i = 0; i < tris.size();i++) {
         //    Tri T = tris[i];
@@ -103,14 +110,14 @@ public:
         //}
 
         if (tris.size() > 0) {
-            auto BVH_con_start = chrono::high_resolution_clock::now();
+            auto BVH_con_start = high_resolution_clock::now();
             cout << padString("[BVH] Constructing", ".", 100) << flush;
 
             bvh->construct_dangerous(tris); //note, this will cause the BVH to break when tris moves out of scope
 
-            auto BVH_con_end = chrono::high_resolution_clock::now();
-            cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_con_end - BVH_con_start).count() << "ms]" << endl;
-            auto BVH_collapse_start = chrono::high_resolution_clock::now();
+            auto BVH_con_end = high_resolution_clock::now();
+            cout << "[Done][" << duration_cast<milliseconds>(BVH_con_end - BVH_con_start).count() << "ms]" << endl;
+            auto BVH_collapse_start = high_resolution_clock::now();
             cout << padString("[BVH] Flattening", ".", 100) << flush;
 
             PS->emissive_tris = bvh->get_emissive_tris();
@@ -160,8 +167,8 @@ public:
                 }
             }
 #endif
-            auto BVH_collapse_end = chrono::high_resolution_clock::now();
-            cout << "[Done][" << chrono::duration_cast<chrono::milliseconds>(BVH_collapse_end - BVH_collapse_start).count() << "ms]" << endl;
+            auto BVH_collapse_end = high_resolution_clock::now();
+            cout << "[Done][" << duration_cast<milliseconds>(BVH_collapse_end - BVH_collapse_start).count() << "ms]" << endl;
         }
         return PS;
     }

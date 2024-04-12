@@ -13,98 +13,194 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Source Files\Core">
+      <UniqueIdentifier>{83882734-f995-41a1-b98e-9261f848df78}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\contructs">
+      <UniqueIdentifier>{668daa3c-d3c1-409c-88c0-bdc86a491194}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Core\Managers">
+      <UniqueIdentifier>{93cf8d20-a766-4794-befc-3597ea11d56a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Core\Gui">
+      <UniqueIdentifier>{1f88054f-affb-46dd-af38-91297f63fc48}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\externals">
+      <UniqueIdentifier>{4464d2e3-cab2-4dda-987b-82989b462bb8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Core\config">
+      <UniqueIdentifier>{be0c1bf8-9ee5-4b68-a392-086f51c4eaa2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Supporting">
+      <UniqueIdentifier>{8048251d-2a2e-4c11-abbf-78329fcf8d7b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Core\Processing">
+      <UniqueIdentifier>{43090e07-1e4b-4b12-81bd-c4b8befb801b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Core\Primitives">
+      <UniqueIdentifier>{ff06eae4-9d66-4d50-b837-9e9bc50c797d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="_XYZ.deprecated">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Materials.h">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Matrix.h">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VecLib.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="XYZ.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="VecLib.h">
       <Filter>Header Files</Filter>
-    </ClCompile>
-    <ClCompile Include="XorRandom.cpp">
-      <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Coredefs.h">
       <Filter>Header Files</Filter>
     </ClCompile>
-    <ClCompile Include="Coredefs.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="XorRandom.h">
       <Filter>Header Files</Filter>
     </ClCompile>
+    <ClCompile Include="XYZ.cpp">
+      <Filter>Source Files\contructs</Filter>
+    </ClCompile>
+    <ClCompile Include="VecLib.cpp">
+      <Filter>Source Files\contructs</Filter>
+    </ClCompile>
+    <ClCompile Include="XorRandom.cpp">
+      <Filter>Source Files\contructs</Filter>
+    </ClCompile>
+    <ClCompile Include="Matrix.h">
+      <Filter>Source Files\contructs</Filter>
+    </ClCompile>
     <ClCompile Include="commons.cpp">
+      <Filter>Source Files\Core\config</Filter>
+    </ClCompile>
+    <ClCompile Include="Coredefs.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Main.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="_XYZ.deprecated">
+      <Filter>Source Files\Supporting</Filter>
+    </ClCompile>
+    <ClCompile Include="Materials.h">
+      <Filter>Source Files\Core\Primitives</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\imgui.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\imgui_demo.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\imgui_draw.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\imgui_tables.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\imgui_widgets.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\backends\imgui_impl_dx12.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\backends\imgui_impl_win32.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui_gui_opengl.cpp">
+      <Filter>Source Files\Core\Gui</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\backends\imgui_impl_opengl2.cpp">
+      <Filter>Source Files\externals</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui\backends\imgui_impl_opengl3.cpp">
+      <Filter>Source Files\externals</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="json.hpp">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Primitives.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Transformation.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="BVH.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Camera.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Scene.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Core.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Ray.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="FileLoading.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="SceneManager.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="GUI.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ImageProcessing.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
     <ClInclude Include="XYZ.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Texture.h">
+      <Filter>Source Files\contructs</Filter>
+    </ClInclude>
+    <ClInclude Include="SceneManager.h">
+      <Filter>Source Files\Core\Managers</Filter>
+    </ClInclude>
+    <ClInclude Include="ImageProcessing.h">
+      <Filter>Source Files\Core\Managers</Filter>
+    </ClInclude>
+    <ClInclude Include="FileLoading.h">
+      <Filter>Source Files\Core\Managers</Filter>
+    </ClInclude>
+    <ClInclude Include="GUI.h">
+      <Filter>Source Files\Core\Gui</Filter>
+    </ClInclude>
+    <ClInclude Include="BVH.h">
+      <Filter>Source Files\Core\Processing</Filter>
+    </ClInclude>
+    <ClInclude Include="Core.h">
+      <Filter>Source Files\Core\Processing</Filter>
+    </ClInclude>
+    <ClInclude Include="Transformation.h">
+      <Filter>Source Files\Core\Primitives</Filter>
+    </ClInclude>
+    <ClInclude Include="Primitives.h">
+      <Filter>Source Files\Core\Primitives</Filter>
+    </ClInclude>
+    <ClInclude Include="Ray.h">
+      <Filter>Source Files\Core\Primitives</Filter>
+    </ClInclude>
+    <ClInclude Include="Camera.h">
+      <Filter>Source Files\Core\Primitives</Filter>
+    </ClInclude>
+    <ClInclude Include="Scene.h">
+      <Filter>Source Files\Core\Primitives</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\imconfig.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\imgui.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\imgui_internal.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\imstb_rectpack.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\imstb_textedit.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\imstb_truetype.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\backends\imgui_impl_dx12.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\backends\imgui_impl_win32.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
     <ClInclude Include="Config.h">
-      <Filter>Header Files</Filter>
+      <Filter>Source Files\Core\config</Filter>
     </ClInclude>
     <ClInclude Include="commons.h">
-      <Filter>Header Files</Filter>
+      <Filter>Source Files\Core\config</Filter>
     </ClInclude>
-    <ClInclude Include="Texture.h">
-      <Filter>Source Files</Filter>
+    <ClInclude Include="imgui\backends\imgui_impl_opengl2.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\backends\imgui_impl_opengl3.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\backends\imgui_impl_opengl3_loader.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\examples\libs\glfw\include\GLFW\glfw3.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui\examples\libs\glfw\include\GLFW\glfw3native.h">
+      <Filter>Source Files\externals</Filter>
+    </ClInclude>
+    <ClInclude Include="PDF.h">
+      <Filter>Source Files\Core\Processing</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Addon.py">
-      <Filter>Source Files</Filter>
+      <Filter>Source Files\Supporting</Filter>
     </Text>
   </ItemGroup>
 </Project>
