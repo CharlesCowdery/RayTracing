@@ -11,7 +11,7 @@
 
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
-- Materials are based on the industry standard BRDF reflectance model.
+- Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/).
 - Full material texturing support, including normal mapping.
 - Vertex smoothing/smooth shading.
 - Direct light sampling for all puctual light types.
@@ -20,11 +20,14 @@
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
 - Acceleration is based on an AVX specialized 8 wide QBVH [(Wald, Benthin, Boulos)](https://www.cs.cmu.edu/afs/cs/academic/class/15869-f11/www/readings/wald08_widebvh.pdf).
-- Utilizes the Visible NDF PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180)
+- Utilizes the visible normal distribution PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180)
 - Textures are stored via Morton Tiling for increased cache coherance.
 
 
 ## About the project
-This was an educational project I took on in 2023 to exercise my skills in C++, and to pursue an interest in simulation. As such, this project is composed entirely of my own code, with the exception of the standard library, SFML (a basic graphics lib) and tinyGLTF (a gltf file parser). 
+This was an educational research project I took on in 2023 to exercise my skills in C++, and to pursue an interest in simulation. As such, this project is composed entirely of my own code, with the exception of the standard library, SFML + Dear ImGui (basic graphics & UI lib) and tinyGLTF (a gltf file parser). 
 
 The primary focus of this is not neccessarily to produce photorealistic outputs, but to instead optimize and iterate on the concept of raytracing. I had started this project out of an interest in spatial acceleration structures, and it was meant to be a simple 1-2 month digression. This has since become my most ambitious and challenging project to date, and the mark it has left on my understanding of both programming and research cannot be understated.
+
+## Importance references
+
