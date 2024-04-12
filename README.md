@@ -27,6 +27,7 @@
 - Multithreaded texture loading.
 
 ## Future Improvements
+- BRDF optimization pass
 - BVH spatial splitting
 - Multithreaded QBVH specialized generation
 - Improved Monte Carlo Sampling / Importance Sampling
@@ -39,13 +40,15 @@ This is an ongoing educational research project I took on in 2023 to exercise my
 The primary focus of this is not neccessarily to produce photorealistic outputs, but to instead optimize and iterate on the concept of raytracing. I had started this project out of an interest in spatial acceleration structures, and it was meant to be a simple 1-2 month digression. This has since become my most ambitious and challenging project to date, and the mark it has left on my understanding of both programming and research cannot be understated.
 
 ## Important/Useful references
+- Zap Andersson, et al. OpenPBR Surface specification, version 0.3, 2024-02-21. - [Link](https://academysoftwarefoundation.github.io/OpenPBR/)
 - Eric Heitz, Eugene d’Eon. Importance Sampling Microfacet-Based BSDFs using the Distribution of
 Visible Normals. Computer Graphics Forum, 2014. ffhal-00996995v1f - [link](https://inria.hal.science/hal-00996995v1/document)
 - Eric Heitz. Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs. \[Research
 Report\] RR-8468, 2014. ffhal-00942452v1f - [link](https://inria.hal.science/hal-00942452v1/document)
 - Wenzel Jakob, Greg Humphreys. Physically Based Rendering: From Theory To Implementation. 4th edition, 2023. - [link](https://www.pbr-book.org/)
 - Naty Hoffman. Physics and Math of Shading. Siggraph 2015. - [Link](https://blog.selfshadow.com/publications/s2015-shading-course/hoffman/s2015_pbs_physics_math_slides.pdf)
-- Zap Andersson, et al. OpenPBR Surface specification, version 0.3, 2024-02-21. - [Link](https://academysoftwarefoundation.github.io/OpenPBR/)
+- Jakub Boksansky. Crash Course in BRDF Implementation. - [Link](https://boksajak.github.io/files/CrashCourseBRDF.pdf)
+- Jacco Bikker. How to Build a BVH - [Link](https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/)
 
 
 
