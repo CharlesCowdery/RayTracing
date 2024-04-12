@@ -11,7 +11,7 @@
 
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
-- Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/).
+- Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/) and [(Heitz)](https://inria.hal.science/hal-00942452v1/document).
 - Full material texturing support, including normal mapping.
 - Vertex smoothing/smooth shading.
 - Direct light sampling for all puctual light types.
@@ -20,8 +20,9 @@
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
 - Acceleration is based on an AVX specialized 8 wide QBVH [(Wald, Benthin, Boulos)](https://www.cs.cmu.edu/afs/cs/academic/class/15869-f11/www/readings/wald08_widebvh.pdf).
-- Utilizes the visible normal distribution PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180)
+- Utilizes the visible normal distribution PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180).
 - Textures are stored via Morton Tiling for increased cache coherance.
+- Multithreaded texture loading.
 
 
 ## About the project
