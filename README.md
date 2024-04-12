@@ -20,6 +20,7 @@
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
 - Acceleration is based on an AVX specialized 8 wide QBVH [(Wald, Benthin, Boulos)](https://www.cs.cmu.edu/afs/cs/academic/class/15869-f11/www/readings/wald08_widebvh.pdf).
+- Utilizes the Visible NDF PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180)
 - Textures are stored via Morton Tiling for increased cache coherance.
 
 
