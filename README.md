@@ -12,11 +12,11 @@
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
 - Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/) and [(Heitz)](https://inria.hal.science/hal-00942452v1/document).
-  - Specularity determined by IOR via the Microfacet BRDF
+  - Specularity determined by IOR via the Microfacet BRDF model.
   - Utilizes the Oren-Nayar diffuse equation.
 - Full material texturing support, including normal mapping.
 - Vertex smoothing/smooth shading.
-- Direct light sampling for all puctual light types.
+- Direct light sampling for all implemented puctual light types.
 - Utilizes the OCIO standard to implement color spaces.
 
 ## Technical Features
@@ -26,6 +26,12 @@
 - Textures are stored via Morton Tiling for increased cache coherance.
 - Multithreaded texture loading.
 
+## Future Improvements
+- BVH spatial splitting
+- Multithreaded QBVH specialized generation
+- Improved Monte Carlo Sampling / Importance Sampling
+- Accelerated loading of large textures
+- Full Fledged GUI
 
 ## About the project
 This was an educational research project I took on in 2023 to exercise my skills in C++, and to pursue an interest in simulation. As such, this project is composed entirely of my own code, with the exception of the standard library, SFML + Dear ImGui (basic graphics & UI lib) and tinyGLTF (a gltf file parser). 
