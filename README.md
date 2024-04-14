@@ -7,7 +7,9 @@
 
 ![the big small render](https://github.com/CharlesCowdery/RayTracing/assets/54870004/302b9f06-bb9e-4698-b969-b1657ac4e76d)
 
-![scandian-small](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/4b448805-f122-4898-8f95-45d2c188f1a6)
+![scandianIITheScandaning-saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/5875afe9-f6f2-4608-a954-d9b2a906085e)
+
+
 
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
