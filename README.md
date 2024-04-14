@@ -29,17 +29,19 @@
 - Multithreaded texture loading.
 
 ## Future Improvements
-- BRDF optimization pass
+- Transmissive materials
+- Subsurface Scattering
 - BVH spatial splitting
 - Multithreaded QBVH specialized generation
 - Improved Monte Carlo Sampling / Importance Sampling
 - Accelerated loading of large textures
-- Full Fledged GUI
 
 ## About the project
 This is an ongoing educational research project I took on in 2023 to exercise my skills in C++, and to pursue an interest in simulation. As such, this project is composed entirely of my own code, with the exception of the standard library, SFML + Dear ImGui (basic graphics & UI lib) and tinyGLTF (a gltf file parser). 
 
-The primary focus of this is not neccessarily to produce photorealistic outputs, but to instead optimize and iterate on the concept of raytracing. I had started this project out of an interest in spatial acceleration structures, and it was meant to be a simple 1-2 month digression. This has since become my most ambitious and challenging project to date, and the mark it has left on my understanding of both programming and research cannot be understated.
+The primary focus of this is not neccessarily to produce photorealistic outputs, but to instead optimize and iterate on the concept of raytracing. What started as an interest in spatial acceleration structures has long since evolved past a 1-2 month digression. I've had enforced upon me strong morals about project management and feature scope. Features cannot be just _tackled_, they must be approached.
+
+I've learned an immeasurable amount about programming from this project, from nitty gritty C++ specifics, to the overall tradeoffs of optimization complexity. It has most importantly taught me how to research. How to understand and breakdown whitepapers, grasping the meaning behind the methodologies. It has taught me the importance of iteration, to push bounds slowly but methodically. 
 
 ## Important/Useful references
 - Zap Andersson, et al. OpenPBR Surface specification, version 0.3, 2024-02-21. - [Link](https://academysoftwarefoundation.github.io/OpenPBR/)
