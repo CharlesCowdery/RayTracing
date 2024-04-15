@@ -1,5 +1,5 @@
 
-![splash](https://github.com/CharlesCowdery/RayTracing/assets/54870004/03d5a988-0da0-4adf-86bb-f77941aafbc6)
+![splash](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/7d059b3d-11d5-4fab-a3a1-9a5d73ffb55b)
 
 **SpatialRay** is an open sourced CPU based raytraced rendering engine. Based on the BRDF reflectance model, it produces photolike outputs of complex scenes. 
 
