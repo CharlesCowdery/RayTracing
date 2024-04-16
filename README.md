@@ -21,12 +21,17 @@
 - Direct light sampling for all implemented puctual light types.
 - Utilizes the OCIO standard to implement color spaces.
 
+
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
 - Acceleration is based on an AVX specialized 8 wide QBVH [(Wald, Benthin, Boulos)](https://www.cs.cmu.edu/afs/cs/academic/class/15869-f11/www/readings/wald08_widebvh.pdf).
 - Utilizes the visible normal distribution PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180).
 - Textures are stored via Morton Tiling for increased cache coherance.
 - Multithreaded texture loading.
+### Features Noise Analysis and Adapative Sampling
+![image](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/505a151f-72a0-4809-bb98-f828741650d9)
+Red highlighting denotes areas of higher noise.
+Based on [(Dammertz, Hanika)](https://www.semanticscholar.org/paper/A-Hierarchical-Automatic-Stopping-Condition-for-Dammertz-Hanika/8329759ae51c924557f375707e4989549c6c1b46)
 
 ## Future Improvements
 - Transmissive materials
@@ -53,6 +58,7 @@ Report\] RR-8468, 2014. ffhal-00942452v1f - [link](https://inria.hal.science/hal
 - Naty Hoffman. Physics and Math of Shading. Siggraph 2015. - [Link](https://blog.selfshadow.com/publications/s2015-shading-course/hoffman/s2015_pbs_physics_math_slides.pdf)
 - Jakub Boksansky. Crash Course in BRDF Implementation. - [Link](https://boksajak.github.io/files/CrashCourseBRDF.pdf)
 - Jacco Bikker. How to Build a BVH - [Link](https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/)
+- Dammertz, H., Hanika, J., Keller, A., & Lensch, H.P. (2010). A Hierarchical Automatic Stopping Condition for Monte Carlo Global Illumination. - [Link](https://www.semanticscholar.org/paper/A-Hierarchical-Automatic-Stopping-Condition-for-Dammertz-Hanika/8329759ae51c924557f375707e4989549c6c1b46)
 
 
 
