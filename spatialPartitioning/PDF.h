@@ -118,7 +118,7 @@ namespace PDF {
         }
         prepped = true;
         steady_clock::time_point end = steady_clock::now();
-        cout << "NDF Inverse Lookup Table Generation Done [" << duration_cast<milliseconds>(end - start).count() << "ms]" << endl;
+        cout << "[Core] NDF Inverse Lookup Table Generation Done [" << duration_cast<milliseconds>(end - start).count() << "ms]" << endl;
 
     }
     float sample(float factor, float a) {

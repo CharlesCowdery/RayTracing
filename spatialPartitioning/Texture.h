@@ -8,8 +8,61 @@
 
 #define USE_MORTON 0
 
+typedef XYZ(*ConverterFunction)(float, float, float);
+
+class TransferFunction {
+public:
+    float scale;
+    ConverterFunction converter;
+    TransferFunction(ConverterFunction f, float s = -9999) {
+        converter = f;
+        scale = s;
+    }
+    bool operator==(const TransferFunction& other) const {
+        return scale == other.scale && converter == other.converter;
+    }
+    bool operator<(const TransferFunction& other) const {
+        bool c1 = converter < other.converter;
+        bool e1 = converter == other.converter;
+        bool c2 = scale < other.scale;
+        return c1 || (e1 && c2);
+    }
+};
+
 template <typename T>
 class Texture {
+private:
+    void load_no_scale(unsigned char* img, int width, int height, int components, ConverterFunction converter) {
+        unsigned int position = 0;
+        unsigned int data_pos = 0;
+        for (unsigned int y = 0; y < resolution_y; y++) {
+            for (unsigned int x = 0; x < resolution_x; x++) {
+                position += components;
+                float r = ((float)img[position + 0]) / 255.0;
+                float g = ((float)img[position + 1]) / 255.0;
+                float b = ((float)img[position + 2]) / 255.0;
+                unsigned int address = to_memory(x, y);
+                data[address] = (converter(r, g, b));
+                data_pos++;
+            }
+        }
+    }
+    void load_with_scale(unsigned char* img, int width, int height, int components, ConverterFunction converter, float scale) {
+        unsigned int position = 0;
+        unsigned int data_pos = 0;
+        for (unsigned int y = 0; y < resolution_y; y++) {
+            for (unsigned int x = 0; x < resolution_x; x++) {
+                position += components;
+                float r = ((float)img[position + 0]) / 255.0;
+                float g = ((float)img[position + 1]) / 255.0;
+                float b = ((float)img[position + 2]) / 255.0;
+                unsigned int address = to_memory(x, y);
+                XYZ in = (converter(r, g, b));
+                data[address] = XYZ::normalize((in * 2 - 1) * XYZ(scale, scale, 1.0));
+                data_pos++;
+            }
+        }
+    }
 public:
     int resolution_x;
     int resolution_y;
@@ -26,27 +79,24 @@ public:
     Texture(T* data_ptr) {
         data = data_ptr;
     }
-    Texture(unsigned char* img, int width, int height, int components, T(*converter)(float, float, float)) {
-        allocate(width, height);
-        unsigned int position = 0;
-        unsigned int data_pos = 0;
-        for (unsigned int y = 0; y < resolution_y; y++) {
-            for (unsigned int x = 0; x < resolution_x; x++) {
-                position += components;
-                float r = ((float)img[position + 0]) / 255.0;
-                float g = ((float)img[position + 1]) / 255.0;
-                float b = ((float)img[position + 2]) / 255.0;
-                unsigned int address = to_memory(x, y);
-                data[address] = (converter(r, g, b));
-                data_pos++;
-            }
-        }
+    Texture(unsigned char* img, int width, int height, int components, TransferFunction TF) {
+        load(img, width, height, components, TF);
     }
     ~Texture() {
         if (data != nullptr) {
             free(data);
         }
     }
+    void load(unsigned char* img, int width, int height, int components, TransferFunction TF) {
+        allocate(width, height);
+        if (TF.scale == -9999) {
+            load_no_scale(img, width, height, components, TF.converter);
+        }
+        else {
+            load_with_scale(img, width, height, components, TF.converter, TF.scale);
+        }
+    }
+
     Texture<T>* clone_shallow() {
         Texture<T>* tex = new Texture<T>();
         tex->resolution_x = resolution_x;

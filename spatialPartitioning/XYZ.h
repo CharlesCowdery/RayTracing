@@ -118,7 +118,7 @@ public:
     bool operator !=(const XYZ& other);
     bool operator !=(XYZ& other);
     static bool equals(const XYZ& point, const XYZ& other);
-    bool operator ==(const XYZ& other);
+    bool operator ==(const XYZ& other) const;
     static XYZ linear_mix(float c, const XYZ& first, const XYZ& second);
     struct less_than_x_operator {
         inline bool operator() (const XYZ& point1, const XYZ& point2);
@@ -185,6 +185,7 @@ struct Quat : public XYZ {
     Quat clone();
     float magnitude();
     static float dot(const Quat& q1, const Quat& q2);
+    Quat operator*(const float& scalar) const;
     static Quat multiply(const Quat& q2, const Quat& q1);
     static Quat normalize(const Quat& in);
     static Quat makeRotation_(const XYZ& start, const XYZ& end);

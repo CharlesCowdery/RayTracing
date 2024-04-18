@@ -377,7 +377,7 @@ bool XYZ::operator !=(XYZ& other) {
     bool XYZ::equals(const XYZ& point, const XYZ& other) {
     return (point.X == other.X) && (point.Y == other.Y) && (point.Z == other.Z);
 }
-bool XYZ::operator ==(const XYZ& other) {
+bool XYZ::operator ==(const XYZ& other) const {
     return (X == other.X) && (Y == other.Y) && (Z == other.Z);
 }
 XYZ XYZ::linear_mix(float c, const XYZ& first, const XYZ& second) {
@@ -495,6 +495,9 @@ m256_vec3 m256_vec3::sub_inline(const m256_vec3& v1, const m256_vec3& v2) {
     }
     float Quat::dot(const Quat& q1, const Quat& q2) {
         return q1.X * q2.X + q1.Y * q2.Y + q1.Z * q2.Z + q1.W * q2.W;
+    }
+    Quat Quat::operator*(const float& scalar) const {
+        return Quat(X * scalar, Y * scalar, Z * scalar, W * scalar);
     }
     Quat Quat::multiply(const Quat& q2, const Quat& q1) {
         return Quat(

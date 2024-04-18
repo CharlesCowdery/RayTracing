@@ -1,10 +1,14 @@
 #pragma once
 
+#include <chrono>
+#include <thread>
+#include <vector>
+#include <fstream>
+#include <set>
+
 #include "commons.h"
 #include "XYZ.h"
 #include "Primitives.h"
-#include <vector>
-#include <fstream>
 #include "Core.h"
 #include "SceneManager.h"
 
@@ -19,10 +23,146 @@ using std::ifstream;
 using std::iostream;
 using std::vector;
 using std::is_same;
+using std::set;
+
+using namespace std::chrono;
+
 
 class FileManager {
 public:
     FileManager() {}
+    class TextureLoader {
+    public:
+        class TextureWorker {
+        public:
+            tinygltf::Model* data;
+            thread worker_thread;
+            atomic<bool> running;
+            atomic<bool> stop;
+            atomic<int> job_address;
+            atomic<int> converter_address;
+            map<int, map<TransferFunction, Texture<XYZ>*>>* texture_lookup;
+            TextureWorker(tinygltf::Model* _data, map<int, map<TransferFunction, Texture<XYZ>*>>* _texture_lookup) :
+                data(_data), texture_lookup(_texture_lookup) {
+                running = false;
+                stop = false;
+                job_address = -1;
+                worker_thread = thread(&TextureWorker::main, this);
+            }
+            void main() {
+                while (true) {
+                    if (running.load(std::memory_order_relaxed)) {
+                        runJob();
+                    }
+                    if (stop.load(std::memory_order_relaxed)) {
+                        return;
+                    }
+                    std::this_thread::sleep_for(milliseconds(10));
+                }
+            }
+            void runJob() {
+                int address = job_address.load(std::memory_order_relaxed);
+                int c_address = converter_address.load(std::memory_order_relaxed);
+                auto map_iterator = (*texture_lookup)[address].begin();
+                for (int i = 0; i < c_address; i++) map_iterator++;
+                TransferFunction TF = map_iterator->first;
+                Texture<XYZ>* texture_ptr = map_iterator->second;
+                loadTexture<XYZ>(*data, address, TF, false, texture_ptr);
+                running.store(false, std::memory_order_relaxed);
+            }
+        };
+        tinygltf::Model* data;
+        map<int, map<TransferFunction, Texture<XYZ>*>> texture_lookup;
+        vector<TextureWorker*> workers;
+        void createWorkers(int num) {
+            for (int i = 0; i < num; i++) {
+                TextureWorker* worker = new TextureWorker(data,&texture_lookup);
+                string name = "TextureLoadingThread-" + to_string(i);
+                wstring wname = wstring(name.begin(), name.end());
+                const wchar_t* wcname = wname.c_str();
+                workers.push_back(worker);
+                SetThreadPriority(worker->worker_thread.native_handle(), 0);
+                SetThreadDescription(worker->worker_thread.native_handle(), wcname);
+            }
+        }
+        void dispatchThreads() {
+            int threads_stopped = 0;
+            auto tex_iterator = texture_lookup.begin();
+            auto tex_end = texture_lookup.end();
+            if (tex_iterator == tex_end) return;
+            auto TF_iterator = 0;
+            auto TF_end = tex_iterator->second.size();
+            while (threads_stopped < workers.size()) {
+                for (int i = 0; i < workers.size();i++) {
+                    TextureWorker* worker = workers[i];
+                    if (worker->stop.load(std::memory_order_relaxed)) continue;
+                    if (worker->running.load(std::memory_order_relaxed)) continue;
+                    if (TF_iterator == TF_end) {
+                        if (tex_iterator!=tex_end)tex_iterator++;
+                        if (tex_iterator == tex_end) {
+                            worker->stop.store(true, std::memory_order_relaxed);
+                            threads_stopped++;
+                            continue;
+                        }
+
+                        TF_iterator = 0;
+                        TF_end = tex_iterator->second.size();
+                    }
+                    worker->job_address = tex_iterator->first;
+                    worker->converter_address = TF_iterator;
+                    worker->running.store(true, std::memory_order_relaxed);
+                    TF_iterator++;
+                }
+            }
+        }
+        void loadTextures(tinygltf::Model* _data, int thread_count) {
+            data = _data;
+            cout << padString("", " ", 100) << "\r";
+            cout << "[Load] constructing texture lookup" << endl;
+            for (auto& material_data : data->materials) {
+                auto pbr = material_data.pbrMetallicRoughness;
+                if (pbr.baseColorTexture.index != -1) {
+                    int t_index = pbr.baseColorTexture.index;
+                    TransferFunction tf = TransferFunction(converter_xyz_sRGB);
+                    if (!texture_lookup.contains(t_index)) {
+                        texture_lookup[t_index] = map<TransferFunction, Texture<XYZ>*>();
+                    }
+                    if (!texture_lookup[t_index].contains(tf)) {
+                        texture_lookup[t_index][tf] = new Texture<XYZ>();
+                    }
+                }
+                if (pbr.metallicRoughnessTexture.index != -1) {
+                    int t_index = pbr.metallicRoughnessTexture.index;
+                    TransferFunction tf = TransferFunction(converter_xyz);
+                    if (!texture_lookup.contains(t_index)) {
+                        texture_lookup[t_index] = map<TransferFunction, Texture<XYZ>*>();
+                    }
+                    if (!texture_lookup[t_index].contains(tf)) {
+                        texture_lookup[t_index][tf] = new Texture<XYZ>();
+                    }
+                }
+                if (material_data.normalTexture.index != -1) {
+                    int t_index = material_data.normalTexture.index;
+                    const float scale = material_data.normalTexture.scale;
+                    TransferFunction tf = TransferFunction(converter_xyz, scale);
+                    if (!texture_lookup.contains(t_index)) {
+                        texture_lookup[t_index] = map<TransferFunction, Texture<XYZ>*>();
+                    }
+                    if (!texture_lookup[t_index].contains(tf)) {
+                        texture_lookup[t_index][tf] = new Texture<XYZ>();
+                    }
+                }
+            }
+            createWorkers(thread_count);
+            dispatchThreads();
+            for (int i = 0; i < workers.size(); i++) {
+                workers[i]->stop = true;
+                workers[i]->worker_thread.join();
+                delete workers[i];
+            }
+        }
+
+    };
     static void writeRawFile(vector<vector<XYZ*>>* data, string fName) {
         ofstream file(fName, ios::out | ios::binary | ios::trunc);
         FileManager::writeRaw(data, file);
@@ -327,7 +467,12 @@ public:
         }
 
     };
-    template <typename T> static Texture<T>* loadTexture(tinygltf::Model& data, int index, T(*converter)(float, float, float)) {
+    template <typename T> static Texture<T>* loadTexture(tinygltf::Model& data, int index, TransferFunction TF, bool verbose = false) {
+        Texture<T>* tex_ptr = new Texture<T>();
+        loadTexture<T>(data, index, TF, verbose, tex_ptr);
+        return tex_ptr;
+    }
+    template <typename T> static void loadTexture(tinygltf::Model& data, int index, TransferFunction TF, bool verbose, Texture<T>* tex_ptr) {
         auto& texture_data = data.textures[index];
         int image_index = texture_data.source;
         auto& image_data = data.images[image_index];
@@ -336,8 +481,8 @@ public:
         int res_y = image_data.height;
         int component = image_data.component;
 
-        cout << endl;
-        cout << "[Load] Loading texture \"" << image_data.name << "\"\r" << flush;
+        if(verbose) cout << endl;
+        if(verbose) cout << "[Load] Loading texture \"" << image_data.name << "\"\r" << flush;
 
         if (component != 3 && component != 4) throw exception("illegal texture!");
 
@@ -350,14 +495,11 @@ public:
         }
         if (is_addressable == -1) throw exception("illegal texture typing!");
 
-        Texture<T>* t = new Texture<T>(image_data.image.data(), res_x, res_y, component, converter);
-
-
+        tex_ptr->load(image_data.image.data(), res_x, res_y, component, TF);
 
         image_data.image.clear(); //freeing memory
 
-        cout << padString("", " ", 100) << "\x1b[A\r";
-        return t;
+        if(verbose) cout << padString("", " ", 100) << "\x1b[A\r";
     }
 
     static pair<XY, XY> fetch_transform(tinygltf::TextureInfo& Ti) {
@@ -404,6 +546,12 @@ public:
         vector<char> rot_swizzle = { 0,-2, 1, 3 };
         vector<char> scale_swizzle = { 0,2,1 };
         buffer_accessor buf_accessor = buffer_accessor(data);
+
+        TextureLoader TL = TextureLoader();
+        TL.loadTextures(&data,12);
+
+        map<int,map<TransferFunction,Texture<XYZ>*>>& texture_lookup = TL.texture_lookup;
+        
         cout << padString("", " ", 100) << "\r";
         cout << "[Load] Textures loaded" << endl;
         for (auto& material_data : data.materials) {
@@ -420,14 +568,13 @@ public:
             mat->emissive.set_static(XYZ(emissive) * 25);
 
             mat->name = name;
-            if (name == "PLATES_Mat") {
-                cout << "debugging";
-            }
 
             if (pbr.baseColorTexture.index != -1) {
                 int t_index = pbr.baseColorTexture.index;
+                TransferFunction tf = TransferFunction(converter_xyz_sRGB);
                 mat->UV_map_index = pbr.baseColorTexture.texCoord;
-                Texture<XYZ>* tex = loadTexture<XYZ>(data, t_index, converter_xyz_sRGB);
+                Texture<XYZ>* base_tex = texture_lookup[t_index][tf];
+                Texture<XYZ>* tex = base_tex->clone_shallow();
                 auto transform_data = fetch_transform(pbr.baseColorTexture);
                 tex->set_transform(transform_data.first, transform_data.second);
                 mat->color.set_texture(tex);
@@ -435,11 +582,13 @@ public:
             }
             if (pbr.metallicRoughnessTexture.index != -1) {
                 int t_index = pbr.metallicRoughnessTexture.index;
+                TransferFunction tf = TransferFunction(converter_xyz);
                 mat->UV_map_index = pbr.baseColorTexture.texCoord;
-                Texture<XYZ>* tex = loadTexture<XYZ>(data, t_index, converter_xyz);
+                Texture<XYZ>* base_tex = texture_lookup[t_index][tf];
+                Texture<XYZ>* tex = base_tex->clone_shallow();
                 auto& texture_data = data.textures[t_index];
                 auto& image_data = data.images[texture_data.source];
-                cout << endl << "[Load] Postprocessing texture \"" << image_data.name << "\"\r" << flush;
+                cout << endl << "[Load] Binding texture \"" << image_data.name << "\"\r" << flush;
 
                 auto transform_data = fetch_transform(pbr.metallicRoughnessTexture);
                 tex->set_transform(transform_data.first, transform_data.second);
@@ -466,23 +615,17 @@ public:
                 int t_index = material_data.normalTexture.index;
                 mat->UV_map_index = material_data.normalTexture.texCoord;
                 const float scale = material_data.normalTexture.scale;
-                Texture<XYZ>* tex = loadTexture<XYZ>(data, t_index, converter_xyz);
+                TransferFunction tf = TransferFunction(converter_xyz,scale);
+                Texture<XYZ>* base_tex = texture_lookup[t_index][tf];
+                Texture<XYZ>* tex = base_tex->clone_shallow();
                 auto& texture_data = data.textures[t_index];
                 auto& image_data = data.images[texture_data.source];
-                cout << endl << "[Load] Postprocessing normal map \"" << image_data.name << "\"\r" << flush;
-                int count = tex->size();
-                for (int i = 0; i < count; i++) {
-                    XYZ in = tex->data[i];
-                    XYZ out = XYZ::normalize((in * 2 - 1) * XYZ(scale, scale, 1.0));
-                    tex->data[i] = out;
-                }
 
                 auto transform_data = fetch_transform(material_data.normalTexture);
                 tex->set_transform(transform_data.first, transform_data.second);
 
                 mat->normal.set_texture(tex);
                 mat->use_normals = 1;
-                cout << padString("", " ", 100) << "\x1b[A\r";
             }
             if (material_data.extensions.count("KHR_materials_specular")) {
                 auto specular_iterator = material_data.extensions.find("KHR_materials_specular");

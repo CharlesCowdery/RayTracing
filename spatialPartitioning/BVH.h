@@ -675,7 +675,7 @@ private:
     }
     static float evaluate_split(Split& split, float SA_parent) {
         float traversal_cost = 1;
-        float intersect_cost = 1;
+        float intersect_cost = 32;
         float Sa = split.p.SA() / SA_parent;
         float Sb = split.n.SA() / SA_parent;
         int count_a = split.p.count;
@@ -705,27 +705,103 @@ public:
     vector<Tri*> elements;
     OctBVH* parent;
 
-    struct bounding_packet {
-        Tri** tris;
+    struct sTri {
         XYZ max;
         XYZ min;
-        void reserve(unsigned int count) {
-            tris = (Tri**)_aligned_malloc(sizeof(Tri*) * count, 64);
-        }
-        ~bounding_packet() {
-            free(tris);
+        Tri* parent;
+        char x = -1;
+        char y = -1;
+        char z = -1;
+        sTri(Tri* t) {
+            max = t->AABB_max;
+            min = t->AABB_min;
+            parent = t;
         }
     };
-    void construct(vector<Tri>* tris) {
-        bounding_packet* entry_packet = new bounding_packet();
-        entry_packet->reserve(tris->size());
-        for (int i = 0; i < tris->size(); i++) {
-            entry_packet->tris[i] = &(*tris)[i];
+
+    struct Packet {
+        XYZ max;
+        XYZ min;
+        sTri* tris;
+        int size = 0;
+        void allocate(int num) {
+            tris = (sTri*) _aligned_malloc(sizeof(sTri) * num, 64);
+            size = num;
         }
-        recurse_construct(entry_packet, this);
+    };
+
+    void construct(vector<Tri>* tris) {
+        Packet* entry_packet = new Packet();
+        entry_packet->allocate(tris->size());
+        for (int i = 0; i < tris->size(); i++) {
+            entry_packet->tris[i] = sTri(&(*tris)[i]);
+        }
+        recurse_construct(entry_packet);
     }
 private:
-    void recurse_construct(bounding_packet* BP, OctBVH* parent) {
+    void recurse_construct(Packet* pack) {
+        int subdivs = 4;
+        int total_segs = pow(2, subdivs);
+        XYZ offset = pack->min;
+        XYZ subdiv_mult = ((pack->max - pack->min) / total_segs);
+        XYZ subdiv_mult_inv = 1/subdiv_mult;
+        
+        vector<vector<vector<int>>> segments;
+
+        segments.resize(total_segs);
+        for (auto& vec_y : segments) {
+            vec_y.resize(total_segs);
+            for (auto& vec_z : vec_y) {
+                vec_z.resize(total_segs);
+                for (auto& v : vec_z) {
+                    v = 0;
+                }
+            }
+        }
+
+        vector<sTri> extras;
+        for (int i = 0; i < pack->size; i++) {
+            sTri& t = pack->tris[i];
+            XYZ Mn_loc = XYZ::floor((t.min - offset) * subdiv_mult_inv);
+            XYZ Mx_loc = XYZ::floor((t.max - offset) * subdiv_mult_inv);
+            if (!XYZ::equals(Mn_loc, Mx_loc)) { //note, this may heavily duplicates tris
+                vector<sTri*> current_segments;
+                current_segments.push_back(&t);
+                XYZ split_loc = Mx_loc*subdiv_mult+offset; 
+                if (Mn_loc.X != Mx_loc.X) {
+                    for (sTri* sT : current_segments) {
+                        extras.push_back(sTri(*sT));
+                        current_segments.push_back(&extras.back());
+                        sTri* sT2 = &extras.back();
+                        sT2->min.X = split_loc.X;
+                        sT->max.X = split_loc.X;
+                    }
+                }
+                if (Mn_loc.Y != Mx_loc.Y) {
+                    for (sTri* sT : current_segments) {
+                        extras.push_back(sTri(*sT));
+                        current_segments.push_back(&extras.back());
+                        sTri* sT2 = &extras.back();
+                        sT2->min.Y = split_loc.Y;
+                        sT->max.Y = split_loc.Y;
+                    }
+                }
+                if (Mn_loc.Z != Mx_loc.Z) {
+                    for (sTri* sT : current_segments) {
+                        extras.push_back(sTri(*sT));
+                        current_segments.push_back(&extras.back());
+                        sTri* sT2 = &extras.back();
+                        sT2->min.Y = split_loc.Y;
+                        sT->max.Y = split_loc.Y;
+                    }
+                }
+
+            }
+            t.x = Mn_loc.X;
+            t.y = Mn_loc.Y;
+            t.z = Mn_loc.Z;
+        }
+
 
     }
 };

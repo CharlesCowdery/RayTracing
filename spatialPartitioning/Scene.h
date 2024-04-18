@@ -23,10 +23,10 @@ public:
     vector<PackagedTri> emissive_tris;
     PackagedBVH* flat_bvh = nullptr;
     vector<BVH_AVX> avx_bvh;
-    short monte_carlo_generations = 3;
+    short monte_carlo_generations = 2;
     short max_generations = 5;
-    short monte_carlo_max = 32;
-    float monte_carlo_modifier = 1.0 / 4;
+    short monte_carlo_max = 8;
+    float monte_carlo_modifier = 1.0 / 2;
 };
 
 class Scene {

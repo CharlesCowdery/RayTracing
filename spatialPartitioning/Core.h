@@ -197,7 +197,6 @@ public:
                     }
 #endif
                 }
-
             }
         }
     }
@@ -455,9 +454,9 @@ public:
             
             for (int i = 0; i < bounce_count; i++) {
                 ri++;
-                //if (ri > bounce_count * 10 && i == 0) {
-                //    //cout << "AAA";
-                //}
+                if (ri > bounce_count * 10 && i == 0) {
+                    return aggregate;
+                }
                 //if (ri > bounce_count * 2) {
                 //    cout << ">:(";
                 //}
