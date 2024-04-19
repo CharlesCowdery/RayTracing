@@ -20,18 +20,20 @@
 - Vertex smoothing/smooth shading.
 - Direct light sampling for all implemented puctual light types.
 - Utilizes the OCIO standard to implement color spaces.
-
+- Adaptive sampling allows for noise aware rendering
+  - The noise analysis strategy is based roughly on [(Dammertz, Hanika)](https://www.semanticscholar.org/paper/A-Hierarchical-Automatic-Stopping-Condition-for-Dammertz-Hanika/8329759ae51c924557f375707e4989549c6c1b46). 
+  - Based on a region priority model that directly relates samples per pass of each region to its noise.
 
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
 - Acceleration is based on an AVX specialized 8 wide QBVH [(Wald, Benthin, Boulos)](https://www.cs.cmu.edu/afs/cs/academic/class/15869-f11/www/readings/wald08_widebvh.pdf).
 - Utilizes the visible normal distribution PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180).
+- Russian Roulette based ray termination
 - Textures are stored via Morton Tiling for increased cache coherance.
 - Multithreaded texture loading.
-### Features Noise Analysis and Adapative Sampling
+### Noise Analysis and Adapative Sampling View
 ![image](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/505a151f-72a0-4809-bb98-f828741650d9)
-Red highlighting denotes areas of higher noise.
-Based on [(Dammertz, Hanika)](https://www.semanticscholar.org/paper/A-Hierarchical-Automatic-Stopping-Condition-for-Dammertz-Hanika/8329759ae51c924557f375707e4989549c6c1b46)
+Red highlighting denotes areas of higher noise, and thus increased sampling priority.
 
 ## Future Improvements
 - Transmissive materials
@@ -44,9 +46,9 @@ Based on [(Dammertz, Hanika)](https://www.semanticscholar.org/paper/A-Hierarchic
 ## About the project
 This is an ongoing educational research project I took on in 2023 to exercise my skills in C++, and to pursue an interest in simulation. As such, this project is composed entirely of my own code, with the exception of the standard library, SFML + Dear ImGui (basic graphics & UI lib) and tinyGLTF (a gltf file parser). 
 
-The primary focus of this is not neccessarily to produce photorealistic outputs, but to instead optimize and iterate on the concept of raytracing. What started as an interest in spatial acceleration structures has long since evolved past a 1-2 month digression. I've had enforced upon me strong morals about project management and feature scope. Features cannot be just _tackled_, they must be approached.
+The primary focus of this is not neccessarily to produce photorealistic outputs, but to instead optimize and iterate on the concept of raytracing. What started as an interest in spatial acceleration structures has long since evolved past a 1-2 month digression. 
 
-I've learned an immeasurable amount about programming from this project, from nitty gritty C++ specifics, to the overall tradeoffs of optimization complexity. It has most importantly taught me how to research. How to understand and breakdown whitepapers, grasping the meaning behind the methodologies. It has taught me the importance of iteration, to push bounds slowly but methodically. 
+I've learned an immeasurable amount about programming from this project, from nitty gritty C++ specifics, to the overall tradeoffs of optimization complexity. It has most importantly taught me how to research. How to understand and breakdown whitepapers, grasping the meaning behind the methodologies. I've come to appreciate the importance of iteration, to push bounds slowly but methodically. I've had enforced upon me strong morals about project management and feature scope. Features cannot be just _tackled_, they must be approached.
 
 ## Important/Useful references
 - Zap Andersson, et al. OpenPBR Surface specification, version 0.3, 2024-02-21. - [Link](https://academysoftwarefoundation.github.io/OpenPBR/)
