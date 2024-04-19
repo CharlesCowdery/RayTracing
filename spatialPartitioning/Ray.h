@@ -12,10 +12,11 @@ struct PackagedRay {
     XYZ coefficient;
     Material* IOR_stack[IOR_STACK_SIZE];
     PackagedRay() {};
-    PackagedRay(XYZ _position, XYZ _slope, char gen) :
+    PackagedRay(XYZ _position, XYZ _slope, char gen, XYZ coef = XYZ(1,1,1)) :
         position(_position),
         slope(_slope),
-        generation(gen)
+        generation(gen),
+        coefficient(coef)
     {}
     void move(float distance) {
         position += slope * distance;

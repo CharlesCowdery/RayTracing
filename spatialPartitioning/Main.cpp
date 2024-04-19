@@ -61,7 +61,7 @@ int main(int argc, char* argv[])
     VecLib::prep(gen);
 
     int mode = 0;
-    string fpath = "C:\\Users\\Charlie\\Documents\\models\\Scenes\\dining.glb";
+    string fpath = "C:\\Users\\Charlie\\Documents\\models\\Scenes\\kitchen.glb";
     int scalar = 2;
     int resolution_x = 1080/scalar;
     int resolution_y = 1080/scalar;

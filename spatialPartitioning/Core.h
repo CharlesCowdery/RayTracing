@@ -450,8 +450,9 @@ public:
             if (XYZ::dot(flipped_output, normal) < 0) {
                 return aggregate;
             }
-
             
+            vector<PackagedRay> r_queue;
+
             for (int i = 0; i < bounce_count; i++) {
                 ri++;
                 if (ri > bounce_count * 10 && i == 0) {
@@ -480,12 +481,12 @@ public:
                 if (ref_factor < ref_prob) {
                     slope = XYZ::reflect(flipped_output, MN);
                     material.set_input(slope);
-                    return_coefficient = material.PDF_specular_BRDF() / (float)bounce_count;
+                    return_coefficient = material.PDF_specular_BRDF();
                 }
                 else {
                     slope = material.biased_diffuse_bounce(gen,normal_rot_m);
                     material.set_input(slope);
-                    return_coefficient = material.diffuse_BRDF() / (float)bounce_count;
+                    return_coefficient = material.diffuse_BRDF();
                 }
 
                 if (XYZ::dot(slope, geo_normal) < 0 || XYZ::dot(slope, normal) < 0) {
@@ -495,17 +496,29 @@ public:
                 if (return_coefficient.X < 0 || return_coefficient.Y < 0 || return_coefficient.Z < 0) {
                     i--;
                     continue;
-                    return_coefficient = material.PDF_BRDF() / (float)bounce_count;
                 }
+                XYZ global_return = return_coefficient;
+                float russian_p = std::max(global_return.X, std::max(global_return.Y, global_return.Z));
+                float russian_factor = gen.fRand(0, 1);
+                if (russian_factor > russian_p) {
+                    continue;
+                }
+                return_coefficient = return_coefficient/russian_p;
                 auto ray = PackagedRay(
                     ray_data.position + 0.001 * results.normal,
                     slope,
-                    ray_data.generation + 1
+                    ray_data.generation + 1,
+                    return_coefficient
                 );
                 ray.output = ray_data.output;
+                r_queue.push_back(ray);
+
+            }
+            for (int i = 0; i < r_queue.size(); i++) {
+                PackagedRay& ray = r_queue[i];
                 stats.diffuses_cast++;
                 XYZ returned_light = process_ray(stats, ray);
-                aggregate += return_coefficient * returned_light;
+                aggregate += ray.coefficient/bounce_count * returned_light;
             }
 
             /*

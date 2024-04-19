@@ -292,7 +292,7 @@ public:
     int current_samples_per_pixel = 0;
     const int block_size = 4;
 
-    const int minimum_samples = 128;
+    const int minimum_samples = 512;
 
     int y_increment;
     int x_increment;
@@ -499,8 +499,8 @@ private:
     }
     void analyze_noise(render_stats& rStat) {
         int minimum_size = 8;
-        double split_threshold = 0.1;
-        double done_threshold = 0.001;
+        double split_threshold = 0.2;
+        double done_threshold = 0.0001;
         float max_noise = 0;
         float min_noise = noise_regions[0].noise;
         float avg_noise = 0;
@@ -543,7 +543,7 @@ private:
                     float aux_lum = ImageHandler::luminance(*aux_output[y][x]);
                     float delta = abs(main_lum - aux_lum);
                     if (main_lum == 0) continue;
-                    float error = delta / main_lum;
+                    float error = delta / std::max(pow(main_lum,1.1f), main_lum);
                     col_error[x-NR.start.X] += error * col_scalar;
                     row_error[y-NR.start.Y] += error * row_scalar;
                     total_error += error / count;
