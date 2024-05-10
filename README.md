@@ -11,7 +11,7 @@
 
 ![kitchen](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/c6fe4d82-bf8c-4750-bdb7-9348dbd71569)
 
-![loft_saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/d7783647-1168-4801-8eeb-c38af42b228a)
+![loft_saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/ef6c09f9-3a00-4d08-aa5d-0e64fa53e390)
 
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
@@ -38,6 +38,9 @@
 ### Noise Analysis and Adapative Sampling View
 ![image](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/505a151f-72a0-4809-bb98-f828741650d9)
 Red highlighting denotes areas of higher noise, and thus increased sampling priority.
+
+### AI denoising
+![image](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/487d462b-4dd9-4acc-b4b0-0993add81ce7)
 
 ## Future Improvements
 - Subsurface Scattering
