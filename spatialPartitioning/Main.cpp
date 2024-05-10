@@ -58,6 +58,8 @@ int main(int argc, char* argv[])
     //auto str = std::wstring(buffer).substr(0, pos);
     //cout << string(str.begin(), str.end()) << endl;
 
+    cout << sizeof(PackagedTri) << endl;
+
     VecLib::prep(gen);
 
     int mode = 0;
@@ -65,13 +67,124 @@ int main(int argc, char* argv[])
     int scalar = 2;
     int resolution_x = 1080/scalar;
     int resolution_y = 1080/scalar;
-    int subdivisions = 1;
+    int subdivisions = 5;
+    if (subdivisions % 2 == 0)throw exception("I am lazy and even subdivisions play hell with the noise algo");
     //GUIHandler* GUI = FileManager::openRawFile("outputs.raw");
 
     //GUI->hold_window();
     //SceneManager* scene_manager = load_cornell_box();
 
     SceneManager* scene_manager;
+
+    int test_num = 99999999*0+1;
+    __m256* rands = (__m256*) _aligned_malloc(sizeof(__m256)*test_num,64);
+    __m256 out = _mm256_set1_ps(0);
+
+    int iteration_count = 10;
+    long long total = 0;
+    out = _mm256_set1_ps(0);
+
+    unsigned int NAN_mask = 0x7f800000u;
+
+    for (int i = 0; i < iteration_count; i++) {
+
+        for (int i = 0; i < test_num; i++) {
+            gen.regen_pool();
+            rands[i] = _mm256_mul_ps(gen.pool, AVX_2PI);
+            //rands[i] = _mm256_sub_ps(rands[i], AVX_HALF_PI);
+        }
+
+
+        steady_clock::time_point start = steady_clock::now();
+#pragma loop(no_vector)
+        for (int i = 0; i < test_num; i++) {
+            __m256& reg = rands[i]; //AVX register filled with random values between 0-1
+            float* reg_ptr = (float*)&reg;
+            reg_ptr[0] = VecLib::full_sin(reg_ptr[0]); //run sine on each value
+            reg_ptr[1] = VecLib::full_sin(reg_ptr[1]);
+            reg_ptr[2] = VecLib::full_sin(reg_ptr[2]);
+            reg_ptr[3] = VecLib::full_sin(reg_ptr[3]);
+            reg_ptr[4] = VecLib::full_sin(reg_ptr[4]);
+            reg_ptr[5] = VecLib::full_sin(reg_ptr[5]);
+            reg_ptr[6] = VecLib::full_sin(reg_ptr[6]);
+            reg_ptr[7] = VecLib::full_sin(reg_ptr[7]);
+            //reg = VecLib::full_sin_AVX(reg);
+            //add to an out register to prevent the test from being optimized out
+
+
+
+            //out =  _mm256_add_ps(out, reg);
+        }
+
+        steady_clock::time_point end = steady_clock::now();
+        long long millis = duration_cast<milliseconds>(end - start).count();
+        long long nanos = duration_cast<nanoseconds>(end - start).count();
+        std::cout << "Count: " << test_num << ". Test duration: " << millis << "ms. " << (int)(test_num / (millis / 1000.0)) << "ops/s. " << std::setprecision(3) << (float)nanos / test_num << " ns/op" << endl;
+        total += millis;
+        for (int i = 0; i < test_num; i++) {
+            out = _mm256_add_ps(out, rands[i]);
+        }
+    }
+
+    for(int i = 0; i < 8;i ++) cout << ((float*)&out)[i];
+
+    cout << "Average test time: " << total / iteration_count << "ms"<<endl;
+
+    for (int i = 0; i < test_num; i++) {
+        gen.regen_pool();
+        rands[i] = _mm256_mul_ps(gen.pool, AVX_PI);
+        rands[i] = _mm256_sub_ps(rands[i], AVX_HALF_PI);
+        rands[i] = _mm256_mul_ps(rands[i], _mm256_set1_ps(0.5));
+    }
+
+    out = _mm256_set1_ps(0);
+    float max_error = 0;
+    for (int i = 0; i < test_num; i++) {
+        __m256& reg = rands[i];
+        __m256 reg2;
+        float* reg_ptr = (float*)&reg;//m256 with each value a random 0-1
+        float* reg2_ptr = (float*)&reg2;
+        reg2_ptr[0] = sin(reg_ptr[0]); //run sine on each value
+        reg2_ptr[1] = sin(reg_ptr[1]);
+        reg2_ptr[2] = sin(reg_ptr[2]);
+        reg2_ptr[3] = sin(reg_ptr[3]);
+        reg2_ptr[4] = sin(reg_ptr[4]);
+        reg2_ptr[5] = sin(reg_ptr[5]);
+        reg2_ptr[6] = sin(reg_ptr[6]);
+        reg2_ptr[7] = sin(reg_ptr[7]);
+        reg_ptr[0] = VecLib::full_sin(reg_ptr[0]); //run sine on each value
+        reg_ptr[1] = VecLib::full_sin(reg_ptr[1]);
+        reg_ptr[2] = VecLib::full_sin(reg_ptr[2]);
+        reg_ptr[3] = VecLib::full_sin(reg_ptr[3]);
+        reg_ptr[4] = VecLib::full_sin(reg_ptr[4]);
+        reg_ptr[5] = VecLib::full_sin(reg_ptr[5]);
+        reg_ptr[6] = VecLib::full_sin(reg_ptr[6]);
+        reg_ptr[7] = VecLib::full_sin(reg_ptr[7]);
+        //reg = VecLib::full_sin_AVX(reg);
+        __m256 diff = _mm256_and_ps(AVX_ABS_MASK,_mm256_sub_ps(reg, reg2));
+        float* diff_ptr = (float*)&diff;
+        max_error = std::max(max_error, diff_ptr[0]);
+        max_error = std::max(max_error, diff_ptr[1]);
+        max_error = std::max(max_error, diff_ptr[2]);
+        max_error = std::max(max_error, diff_ptr[3]);
+        max_error = std::max(max_error, diff_ptr[4]);
+        max_error = std::max(max_error, diff_ptr[5]);
+        max_error = std::max(max_error, diff_ptr[6]);
+        max_error = std::max(max_error, diff_ptr[7]);
+
+        //add to an out register to prevent the test from being optimized out
+        out = _mm256_add_ps(out,diff);
+    }
+
+    double total_error = 0;
+    for (int i = 0; i < 8; i++) {
+        total_error+= ((float*)&out)[i];
+    }
+    cout << "Total error: " << to_string(total_error) << endl;
+    cout << "Average error: " << std::setprecision(15) << total_error / test_num /8.0f << endl;
+    cout << "Maximum error: " << std::setprecision(15) << max_error << endl;
+
+    _aligned_free(rands);
 
 
     switch (mode) {

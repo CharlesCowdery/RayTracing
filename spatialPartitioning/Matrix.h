@@ -59,6 +59,9 @@ public:
             point.X * m.data[6] + point.Y * m.data[7] + point.Z * m.data[8]
         );
     }
+    static XYZ applyTBNMatrix(const XYZ& point, const XYZ& T, const XYZ& B, const XYZ& N) {
+        return point.X* T + point.Y * B + point.Z * N;
+    }
     XYZ r1() {
         return XYZ(data[0], data[1], data[2]);
     }

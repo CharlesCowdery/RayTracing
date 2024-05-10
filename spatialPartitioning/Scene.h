@@ -17,16 +17,17 @@ using std::map;
 
 class PackagedScene {
 public:
+    vector<Material> materials;
     vector<PackagedTri> tri_data;
     vector<PTri_AVX> avx_tri_data;
     vector<Light*> lights;
     vector<PackagedTri> emissive_tris;
     PackagedBVH* flat_bvh = nullptr;
     vector<BVH_AVX> avx_bvh;
-    short monte_carlo_generations = 2;
-    short max_generations = 5;
-    short monte_carlo_max = 8;
-    float monte_carlo_modifier = 1.0 / 2;
+    short monte_carlo_generations = 3;
+    short max_generations = 10;
+    short monte_carlo_max = 32;
+    float monte_carlo_modifier = 1.0 / 4;
 };
 
 class Scene {
@@ -38,6 +39,8 @@ public:
     vector<Object*> objects;
     vector<Camera*> cameras;
     Camera* camera;
+
+    vector<Material> materials;
 
     vector<Light*> lights;
 
@@ -74,7 +77,7 @@ public:
         auto start = high_resolution_clock::now();
         cout << padString("[Scene] Prepping", ".", 100) << flush;
         for (Object* O : objects) {
-            O->prep();
+            O->prep(materials);
         }
         camera = cameras[0];
         for (Camera* camera : cameras) {
@@ -90,6 +93,8 @@ public:
 
 
         PackagedScene* PS = new PackagedScene();
+
+        PS->materials = materials;
 
         auto data_group_start = high_resolution_clock::now();
         cout << padString("[Scene] Regrouping data", ".", 100) << flush;
@@ -120,7 +125,7 @@ public:
             auto BVH_collapse_start = high_resolution_clock::now();
             cout << padString("[BVH] Flattening", ".", 100) << flush;
 
-            PS->emissive_tris = bvh->get_emissive_tris();
+            PS->emissive_tris = bvh->get_emissive_tris(materials);
 #if USE_AVX_BVH
             auto collapse_out = BVH_AVX::collapse(bvh);
             PS->avx_bvh = *collapse_out.first;

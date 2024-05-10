@@ -197,6 +197,9 @@
     <ClInclude Include="PDF.h">
       <Filter>Source Files\Core\Processing</Filter>
     </ClInclude>
+    <ClInclude Include="simd_bitonic.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Addon.py">

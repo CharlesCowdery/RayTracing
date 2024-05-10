@@ -9,12 +9,14 @@
 #include <list>
 #include <sstream>
 #include <iomanip>
+#include "OpenImageDenoise/oidn.hpp"
 
 using std::atomic;
 using namespace std::chrono;
 using std::thread;
 using std::wstring;
 using std::stringstream;
+
 
 class RenderThread {
 public:
@@ -190,7 +192,7 @@ public:
     }
     void process_iteratively() {
         float priority = current->priority.load(std::memory_order_relaxed);
-        float scaled = pow(priority, 2);
+        float scaled = priority;
         bool add_one = gen.fRand(0, 1) < (scaled - floor(scaled));
         int to_do = add_one + floor(scaled);
         if (to_do > 0) {
@@ -207,7 +209,7 @@ public:
                 XYZ* output_link = get_output_link(pixel_index);
                 XYZ* aux_output_link = get_output_aux_link(pixel_index);
 
-                XYZ ray_slope = random_slope_at(pixel_coordinate);
+                XYZ ray_slope = random_slope_at(pixel_coordinate,iterations_done%process_info->samples_per_pixel);
                 auto ray = PackagedRay(
                     process_info->emit_coord,
                     ray_slope,
@@ -215,6 +217,10 @@ public:
                 );
 
                 XYZ res = process_info->RE->process_ray(process_info->CD, ray);
+                if (!res.wellDefined()) {
+                    pixel_index--;
+                    continue;
+                }
                 (*output_link) *= (double)iterations_done / (iterations_done + 1);
                 (*output_link) += 1.0 / (iterations_done + 1) * res;
                 if (current->add_aux) {
@@ -243,8 +249,8 @@ public:
     XYZ slope_at(iXY coord, int sub_index) {
         return process_info->camera->slope_at(coord.X, coord.Y, sub_index);
     }
-    XYZ random_slope_at(iXY coord) {
-        return process_info->camera->random_slope_at(coord.X, coord.Y);
+    XYZ random_slope_at(iXY coord, int sub_index) {
+        return process_info->camera->random_slope_at(coord.X, coord.Y, sub_index);
     }
 
 
@@ -292,13 +298,20 @@ public:
     int current_samples_per_pixel = 0;
     const int block_size = 4;
 
-    const int minimum_samples = 512;
+    const int minimum_samples = 64;
 
     int y_increment;
     int x_increment;
 
     vector<noise_region> noise_regions;
     vector<vector<float>> noise_map;
+
+    oidn::DeviceRef device = oidn::newDevice(); // CPU or GPU if available
+    oidn::BufferRef colorBuf;
+    oidn::BufferRef outputBuf;
+    oidn::FilterRef filter;
+    XYZ* colorPtr;
+    XYZ* outputPtr;
 
     steady_clock::time_point render_start;
 
@@ -337,6 +350,18 @@ private:
         cout << endl << "+PREPROCESSING+" << endl;
 
         auto prep_start = high_resolution_clock::now();
+
+        device.commit();
+        filter = device.newFilter("RT");
+        colorBuf = device.newBuffer(current_resolution_x * current_resolution_y * sizeof(XYZ));
+        outputBuf = device.newBuffer(current_resolution_x * current_resolution_y * sizeof(XYZ));
+        filter.setImage("color", colorBuf, oidn::Format::Float3, current_resolution_x, current_resolution_y);
+        filter.setImage("output", outputBuf, oidn::Format::Float3, current_resolution_x, current_resolution_y);
+        filter.set("hdr", true);
+        filter.commit();
+
+        colorPtr = (XYZ*)colorBuf.getData();
+        outputPtr = (XYZ*)outputBuf.getData();
 
         for (int y = 0; y < current_resolution_y; y++) {
             vector<XYZ*> row;
@@ -382,6 +407,7 @@ private:
         steady_clock::time_point start_time;
         steady_clock::time_point now;
         steady_clock::time_point last_refresh = high_resolution_clock::now();
+        steady_clock::time_point last_denoise_update = high_resolution_clock::now();
         long long parent_rays = 0;
         long long child_rays = 0;
         long long parent_rays_last = 0;
@@ -499,8 +525,8 @@ private:
     }
     void analyze_noise(render_stats& rStat) {
         int minimum_size = 8;
-        double split_threshold = 0.2;
-        double done_threshold = 0.0001;
+        double split_threshold = 0.27;
+        double done_threshold = 0.00001;
         float max_noise = 0;
         float min_noise = noise_regions[0].noise;
         float avg_noise = 0;
@@ -645,7 +671,7 @@ private:
             noise_region& NR = noise_regions[i];
             for (int y = NR.start.Y; y < NR.end.Y; y++) {
                 for (int x = NR.start.X; x < NR.end.X; x++) {
-                    noise_map[y][x] = NR.active*(NR.noise/NR.avg_noise);
+                    noise_map[y][x] = std::min(NR.active*(NR.noise/NR.avg_noise),4.0f);
                 }
             }
         }
@@ -659,7 +685,7 @@ private:
             for (int pixel_index = 0; pixel_index < total_pixels; pixel_index++) {
                 iXY internal_offset = get_pixel_offset(pixel_index);
                 iXY final_position = block_offset + internal_offset;
-                avg_priority += noise_map[final_position.Y][final_position.X]*multiplier;
+                avg_priority += pow(noise_map[final_position.Y][final_position.X]*multiplier,2);
             }
             block->priority.store(avg_priority, std::memory_order_relaxed);
             total_burden += avg_priority;
@@ -781,6 +807,7 @@ private:
                 iXY final_coord = block_offset + internal_offset;
                 (*raw_output[final_coord.Y][final_coord.X]) = *block->raws[pixel_index];
                 (*aux_output[final_coord.Y][final_coord.X]) = *block->aux_raws[pixel_index];
+                colorPtr[final_coord.Y * current_resolution_x + final_coord.X] = *raw_output[final_coord.Y][final_coord.X];
                 XYZ color = ImageHandler::post_process_pixel(*raw_output[final_coord.Y][final_coord.X]);
                 GUI.commit_pixel(color, final_coord.X, final_coord.Y);
             }
@@ -875,11 +902,28 @@ private:
         }
         p_strips.clear();
     }
+    void update_denoised() {
+        filter.execute();
+        const char* errorMessage;
+        if (device.getError(errorMessage) != oidn::Error::None) {
+            cout << padString("", " ", 120) << "\r";
+            std::cout << "Denoise Error: " << errorMessage << std::endl;
+        }
+        for (int y = 0; y < current_resolution_y; y++) {
+            for (int x = 0; x < current_resolution_x; x++) {
+                XYZ col = outputPtr[y * current_resolution_x + x];
+                col = ImageHandler::post_process_pixel(col);
+                GUI.commit_denoised_pixel(col,x,y);
+            }
+        }
+        GUI.commit_denoised_canvas();
+    }
     void refresh_display() {
         GUI.commit_canvas();
         GUI.handle_events();
         GUI.update_noise();
         GUI.handle_events_noise();
+        GUI.handle_events_denoised();
     }
     void run_threaded_engine(int mode = 0) {
         render_stats rStat(120, 300);
@@ -924,20 +968,24 @@ private:
             }
             break;
         case 1:
-            assign_iterative_groups(job_stack,blocks);
+            assign_iterative_groups(job_stack, blocks);
             start_threads();
             while (true) {
                 rStat.now = high_resolution_clock::now();
                 if (duration_cast<std::chrono::milliseconds>(rStat.now - rStat.last_refresh).count() > 16) {
-                    gather_thread_stats(rStat,blocks);
+                    gather_thread_stats(rStat, blocks);
                     get_screen_update(blocks);
                     pre_process_stats(rStat);
                     display_stats(rStat);
                     post_process_stats(rStat);
-                    if (duration_cast<std::chrono::seconds>(rStat.now - last_noise_check).count() > 5) {
+                    if (duration_cast<std::chrono::seconds>(rStat.now - last_noise_check).count() > 2) {
                         analyze_noise(rStat);
-                        balance_threads(rStat,blocks);
+                        balance_threads(rStat, blocks);
                         last_noise_check = rStat.now;
+                    }
+                    if (duration_cast<std::chrono::seconds>(rStat.now - rStat.last_denoise_update).count() > 5){
+                        update_denoised();
+                        rStat.last_denoise_update = rStat.now;
                     }
                     refresh_display();
                 }

@@ -197,101 +197,6 @@ public:
         }
         return data;
     }
-    static Mesh* loadObjFile(string fName, Material* mat) {
-        cout << padString("[File] Loading resource: " + fName, ".", 100);
-        ifstream file(fName, ios::in);
-        Mesh* return_value = loadObj(file, mat);
-        cout << "[Done]" << endl;
-        return return_value;
-    }
-    static Mesh* loadObj(ifstream& file, Material* mat) {
-        Mesh* mesh = new Mesh();
-        vector<XYZ> verts;
-        vector<XY> UV_coords;
-        for (std::string line; getline(file, line);) {
-            string line_type = line.substr(0, line.find(" "));
-            vector<string> words = split_string(line, ' ');
-            if (line_type == "#") {
-                continue;
-            }
-            if (line_type == "mtllib") {
-                continue;
-            }
-            if (line_type == "o") {
-                continue;
-            }
-            if (line_type == "v") {
-                verts.push_back(XYZ(
-                    stod(words[1]),
-                    stod(words[2]),
-                    stod(words[3])
-                ));
-                //cout << verts.back() << endl;
-            }
-            if (line_type == "vt") {
-                UV_coords.push_back(XY(
-                    stod(words[1]), stod(words[2])
-                ));
-            }
-            if (line_type == "f") {
-                vector<string> sub_words_1 = split_string(words[1], '/');
-                vector<string> sub_words_2 = split_string(words[2], '/');
-                vector<string> sub_words_3 = split_string(words[3], '/');
-                int v_i0 = stoi(sub_words_1[0]) - 1;
-                int v_i1 = stoi(sub_words_2[0]) - 1;
-                int v_i2 = stoi(sub_words_3[0]) - 1;
-                XY  vt1 = XY(-1, -1);
-                XY  vt2 = XY(-1, -1);
-                XY  vt3 = XY(-1, -1);
-                if (sub_words_1.size() > 1) {
-                    if (sub_words_1[1] != "") {
-                        int vt_i0 = stoi(sub_words_1[1]) - 1;
-                        int vt_i1 = stoi(sub_words_2[1]) - 1;
-                        int vt_i2 = stoi(sub_words_3[1]) - 1;
-                        vt1 = UV_coords[vt_i0];
-                        vt2 = UV_coords[vt_i1];
-                        vt3 = UV_coords[vt_i2];
-                    }
-                }
-                Tri f = Tri(
-                    verts[v_i0], verts[v_i1], verts[v_i2],
-                    vt1, vt2, vt3,
-                    mat);
-                mesh->addTri(f);
-            }
-        }
-        return mesh;
-    }
-    static Mesh* loadTriFile(string fName, Material* mat) {
-        ifstream file(fName, ios::in);
-        return loadTri(file, mat);
-    }
-    static Mesh* loadTri(ifstream& file, Material* mat) {
-        Mesh* mesh = new Mesh();
-        vector<XYZ> verts;
-        for (std::string line; getline(file, line);) {
-            vector<string> words = split_string(line, ' ');
-            if (words.size() > 1) {
-                double v1_x = stod(words[0]);
-                double v1_y = stod(words[1]);
-                double v1_z = stod(words[2]);
-                double v2_x = stod(words[3]);
-                double v2_y = stod(words[4]);
-                double v2_z = stod(words[5]);
-                double v3_x = stod(words[6]);
-                double v3_y = stod(words[7]);
-                double v3_z = stod(words[8]);
-                Tri f1 = Tri(
-                    XYZ(v1_x, v1_y, v1_z),
-                    XYZ(v2_x, v2_y, v2_z),
-                    XYZ(v3_x, v3_y, v3_z),
-                    mat);
-                mesh->addTri(f1);
-                //cout << verts.back() << endl;
-            }
-        }
-        return mesh;
-    }
     static SceneManager* loadGLTFFile(string fName) {
         tinygltf::Model model;
         tinygltf::TinyGLTF loader;
@@ -536,7 +441,7 @@ public:
 
         Scene* scene = new Scene();
         SceneManager* SM = new SceneManager(scene);
-        vector<Material*> materials;
+        vector<Material> materials;
         vector<Mesh*> meshes;
         vector<Camera*> cameras;
         vector<Object*> objects;
@@ -566,7 +471,7 @@ public:
             mat->metallic.set_static(pbr.metallicFactor);
             mat->roughness.set_static(pbr.roughnessFactor);
             mat->emissive.set_static(XYZ(emissive) * 25);
-
+            //mat->transmission.set_static()
             mat->name = name;
 
             if (pbr.baseColorTexture.index != -1) {
@@ -606,7 +511,7 @@ public:
                     mat->metallic.set_texture(metallic);
                 }
                 if (pbr.roughnessFactor != 0) {
-                    if (pbr.roughnessFactor != 1) throw exception("Illegal roughness factor");
+                    //if (pbr.roughnessFactor != 1) throw exception("Illegal roughness factor");
                     mat->roughness.set_texture(roughness);
                 }
                 cout << padString("", " ", 100) << "\x1b[A\r";
@@ -656,10 +561,30 @@ public:
             else {
                 mat->IOR = 1.5;
             }
-            materials.push_back(mat);
+            if (material_data.extensions.count("KHR_materials_transmission")) {
+                auto transmission_iterator = material_data.extensions.find("KHR_materials_transmission");
+                if (transmission_iterator != material_data.extensions.end()) {
+                    auto transmission_value = transmission_iterator->second.Get("transmissionFactor");
+                    auto transmission = transmission_value.GetNumberAsDouble();
+                    mat->transmission.set_static(transmission);
+                }
+            }
+            else {
+                mat->transmission.set_static(0);
+            }
+            materials.push_back(*mat);
         }
         cout << padString("", " ", 100) << "\r";
         cout << "[Load] Materials loaded" << endl;
+        Material default_mat = Material();
+        default_mat.roughness.set_static(0.5);
+        default_mat.IOR = 1.5;
+        default_mat.color = XYZ(1, 1, 1);
+        default_mat.metallic.set_static(0);
+        default_mat.name = "SR default material";
+        default_mat.use_normals = false;
+        materials.push_back(default_mat);
+        int default_index = materials.size() - 1;
         for (auto& model_data : data.meshes) {
             auto& primitives = model_data.primitives;
             Mesh* mesh = new Mesh();
@@ -668,17 +593,17 @@ public:
             cout << "[Load] Loading mesh \"" << mesh->name << "\"\r" << flush;
             for (auto& primitive : primitives) {
                 auto& attributes = primitive.attributes;
-                Material* mat;
+                short mat;
                 if (primitive.material > -1) {
-                    mat = materials[primitive.material];
+                    mat = primitive.material;
                 }
                 else {
-                    mat = new Material();
+                    mat = default_index;
                 }
 
                 assert(attributes.count("POSITION") > 0);
                 auto  position_accessor_index = attributes["POSITION"];
-                auto texcoord_accessor_index = attributes["TEXCOORD_" + to_string(mat->UV_map_index)];
+                auto texcoord_accessor_index = attributes["TEXCOORD_" + to_string(materials[mat].UV_map_index)];
                 auto normal_accessor_index = attributes["NORMAL"];
                 auto tangent_accessor_index = attributes["TANGENT"];
                 auto tangent_accessor = data.accessors[tangent_accessor_index];
@@ -852,6 +777,7 @@ public:
         }
 
         scene->camera = scene->cameras[0];
+        scene->materials = materials;
         return SM;
     }
 

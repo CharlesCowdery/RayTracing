@@ -4,15 +4,30 @@
 #include "XorRandom.h"
 #include <vector>
 #include <immintrin.h>
+#include "commons.h"
 
 #define PI 3.14159265358979323846264
 
-#define LOOKUP_SIZE_TRIG 1024
+#define LOOKUP_SIZE_TRIG 2048
 #define LOOKUP_TRIG_MASK (LOOKUP_SIZE_TRIG-1)
 #define LOOKUP_SIZE_BIASED_HEMI 1024*32
 #define LOOKUP_BIASED_HEMI_MASK (LOOKUP_SIZE_BIASED_HEMI-1)
 
 namespace VecLib {
+    __m256 full_cos_AVX(const __m256& x);
+    __m256 full_sin_AVX(__m256& x);
+    __m256 full_sin_AVX_(const __m256& x);
+    __m256 quarter_cosine_AVX(const __m256& x);
+    float full_cos(const float& x);
+    float full_cos_(const float& x);
+    float full_sin(const float& x);
+    float full_sin__(const float& x);
+    float full_sin_(const float& x);
+    float tan(const float& x);
+    float quarter_cosine(const float& x);
+    void quarter_cosine_ss(__m128& x);
+    void whole_sine_ss(__m128& x);
+    void whole_cosine_ss(__m128& x);
     __m256 sgn_fast(__m256& x);
     void cross_avx(const m256_vec3& v1, const m256_vec3& v2, m256_vec3& output);
     void dot_avx(const m256_vec3& v1, const m256_vec3& v2, __m256& output);

@@ -7,6 +7,7 @@
 #include "commons.h"
 
 #define USE_MORTON 0
+#define USE_CHAR 1
 
 typedef XYZ(*ConverterFunction)(float, float, float);
 
@@ -42,12 +43,13 @@ private:
                 float g = ((float)img[position + 1]) / 255.0;
                 float b = ((float)img[position + 2]) / 255.0;
                 unsigned int address = to_memory(x, y);
-                data[address] = (converter(r, g, b));
+                commit(address,converter(r, g, b));
                 data_pos++;
             }
         }
     }
     void load_with_scale(unsigned char* img, int width, int height, int components, ConverterFunction converter, float scale) {
+        use_normal_transform = true;
         unsigned int position = 0;
         unsigned int data_pos = 0;
         for (unsigned int y = 0; y < resolution_y; y++) {
@@ -58,7 +60,7 @@ private:
                 float b = ((float)img[position + 2]) / 255.0;
                 unsigned int address = to_memory(x, y);
                 XYZ in = (converter(r, g, b));
-                data[address] = XYZ::normalize((in * 2 - 1) * XYZ(scale, scale, 1.0));
+                commit(address,XYZ::normalize((in * 2 - 1) * XYZ(scale, scale, 1.0)));
                 data_pos++;
             }
         }
@@ -70,14 +72,16 @@ public:
     double V_multiplier;
     XY scale = XY(1, 1);
     XY offset = XY(0, 0);
-    T* data = nullptr;//was originally a vector, but the red tape surrounding vector made texture loading very slow in debug mode
+    bool use_normal_transform = false;
+#if USE_CHAR
+    unsigned char* data = nullptr;//was originally a vector, but the red tape surrounding vectors made texture loading very slow in debug mode
+#else
+    T* data = nullptr;
+#endif
 
 
     Texture() {
         data = nullptr;
-    }
-    Texture(T* data_ptr) {
-        data = data_ptr;
     }
     Texture(unsigned char* img, int width, int height, int components, TransferFunction TF) {
         load(img, width, height, components, TF);
@@ -103,10 +107,70 @@ public:
         tex->resolution_y = resolution_y;
         tex->set_transform(scale, offset);
         tex->data = data;
+        tex->use_normal_transform = use_normal_transform;
         return tex;
     }
-
-
+    void commit_default(unsigned int addr, const T& v) {
+        data[addr] = v;
+    }
+    void commit_char(unsigned int addr, const XYZ& v) {
+        if (use_normal_transform) {
+            unsigned char r = v.X * 127+128;
+            unsigned char g = v.Y * 127+128;
+            unsigned char b = v.Z * 127+128;
+            data[addr * 3 + 0] = r;
+            data[addr * 3 + 1] = g;
+            data[addr * 3 + 2] = b;
+            return;
+        }
+        unsigned char r = v.X * 255;
+        unsigned char g = v.Y * 255;
+        unsigned char b = v.Z * 255;
+        data[addr * 3 + 0] = r;
+        data[addr * 3 + 1] = g;
+        data[addr * 3 + 2] = b;
+    }
+    void commit_char(unsigned int addr, const float& v) {
+        unsigned char r = v * 255;
+        data[addr * 3 + 0] = r;
+    }
+    void commit(unsigned int addr, const T& v){
+#if USE_CHAR
+        commit_char(addr, v);
+#else
+        commit_default(addr, v);
+#endif
+    }
+    T fetch_default(unsigned int addr) {
+        return data[addr];
+    }
+    XYZ fetch_char_XYZ(unsigned int addr) {
+        unsigned char r = data[addr * 3 + 0];
+        unsigned char g = data[addr * 3 + 1];
+        unsigned char b = data[addr * 3 + 2];
+        if (use_normal_transform) {
+            return XYZ((r - 128) / 127.0f, (g - 128) / 127.0f, (b - 128) / 127.0f);
+        }
+        return XYZ(r / 255.0f, g / 255.0f, b / 255.0f);
+    }
+    float fetch_char_float(unsigned int addr) {
+        unsigned char r = data[addr * 3 + 0];
+        return r/255.0f;
+    }
+    template<typename Tf> Tf fetch(unsigned int addr) {
+#if USE_CHAR
+        return Texture<float>::fetch_char_float(addr);
+#else
+        return fetch_default(addr);
+#endif
+    }
+    template<> XYZ fetch<XYZ>(unsigned int addr) {
+#if USE_CHAR
+        return Texture<XYZ>::fetch_char_XYZ(addr);
+#else
+        return fetch_default(addr);
+#endif
+    }
     unsigned int direct_size(unsigned int rX, unsigned int rY) {
         return rX * rY;
     }
@@ -122,12 +186,22 @@ public:
         return direct_size(rX, rY);
 #endif
     }
+#if USE_CHAR
+    void allocate(int rx, int ry) {
+        resolution_x = rx;
+        resolution_y = ry;
+        unsigned int memory_size = get_memory_size(rx, ry);
+        data = (unsigned char*)_aligned_malloc(sizeof(char) * 3 * memory_size, 64);
+    }
+#else
     void allocate(int rx, int ry) {
         resolution_x = rx;
         resolution_y = ry;
         unsigned int memory_size = get_memory_size(rx, ry);
         data = (T*)_aligned_malloc(sizeof(T) * memory_size, 64);
     }
+#endif
+    
 
     void set_transform(XY _scale, XY _offset) {
         scale = _scale;
@@ -144,7 +218,7 @@ public:
         int pos = 0;
         for (int y = 0; y < resolution_y; y++) {
             for (int x = 0; x < resolution_x; x++) {
-                out->data[pos] = lookup(x, y)[channel];
+                out->commit(pos,lookup(x, y)[channel]);
                 pos++;
             }
         }
@@ -168,18 +242,18 @@ public:
 #endif
     }
 
-    T lookup(int x, int y) {
-        x = x % resolution_x;
-        y = y % resolution_y;
-        if (x < 0) x = resolution_x + x;
-        if (y < 0) y = resolution_y + y;
+    T lookup(int lx, int ly) {
+        int x = lx % resolution_x;
+        int y = ly % resolution_y;
+        x = (x < 0)*resolution_x + x;
+        y = (y < 0)*resolution_y + y;
         unsigned int address = to_memory(x, y);
-        return data[address];
+        return fetch<T>(address);
     }
     T getUV(double U, double V) {
         V = 1 - V;
-        int pos_x = (int)floor(U_multiplier * U) % resolution_x;
-        int pos_y = (int)floor(V_multiplier * V) % resolution_y;
+        int pos_x = (int) (U_multiplier * U);
+        int pos_y = (int) (V_multiplier * V);
         return lookup(pos_x, pos_y);
     }
     T getPixelLinear(double U, double V) {
@@ -205,6 +279,7 @@ public:
     }
 };
 
+
 template <typename T>
 class Parameter {
 public:
@@ -223,11 +298,6 @@ public:
     }
     void set_texture(Texture<T>* texture_ptr, bool free = false) {
         if (texture_ptr == NULL) throw std::exception("Illegal texture address");
-        if (texture != nullptr) {
-            if (free) {
-                delete texture;
-            }
-        }
         texture = texture_ptr;
     }
     void set_texture(std::string file_name, bool free = false) {

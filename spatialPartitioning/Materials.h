@@ -9,6 +9,7 @@
 #include "commons.h"
 
 
+
 class MaterialSample {
 public:
     XYZ color;
@@ -107,6 +108,20 @@ public:
         float r_f = roughness - 0.2;
         diff_spread = (r_f * r_f) * PI / 2;
     }
+    float acos(float x) {
+        float negate = float(x < 0);
+        x = abs(x);
+        float ret = -0.0187293;
+        ret = ret * x;
+        ret = ret + 0.0742610;
+        ret = ret * x;
+        ret = ret - 0.2121144;
+        ret = ret * x;
+        ret = ret + 1.5707288;
+        ret = ret * sqrt(1.0 - x);
+        ret = ret - 2 * negate * ret;
+        return negate * 3.14159265358979 + ret;
+    }
     void set_input(XYZ _in) {
         in = _in;
         half = XYZ::normalize((out + in) / 2);
@@ -117,7 +132,9 @@ public:
         dot_HI = std::min(1.0f,XYZ::dot(half, in));
         dot_HO = std::min(1.0f,XYZ::dot(half, out));
 
-        Ti = acos(dot_NI);
+
+
+        Ti = VecLib::Lacos(dot_NI);
 
         XYZ projected_in = XYZ::normalize(in - normal * XYZ::dot(in, normal));
         XYZ projected_out = XYZ::normalize(out - normal * XYZ::dot(out, normal));
@@ -129,7 +146,7 @@ public:
         return ((1 - i_metal) * spec + i_metal);
     }
     XYZ get_R0C() {
-        return XYZ::linear_mix(metallic, XYZ(R0), color);
+        return XYZ::linear_mix(metallic, XYZ(R0), i_metal*color);
     }
     float get_specular_factor() const {
         float g = 1 - dot_NO;
@@ -192,13 +209,19 @@ public:
         float s = sqrt(1 - dot * dot);
         return (-1 + sqrt(1 + a_2 * a_2 * pow(s / c, 2))) / 2;
     }
-    float G1(const XYZ& vec) const { //https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf pg 7
+    float G1_poly(const XYZ& vec) const { //https://www.cs.cornell.edu/~srm/publications/EGSR07-btdf.pdf pg 7
         float c = std::min(XYZ::dot(vec, normal),0.99f);
         float s = sqrt(1 - c * c);
         float _a = 1/(a * s / c);
         float v = (3.535 * _a + 2.181 * _a * _a) / (1 + 2.276 * _a + 2.577 * _a * _a);
         if (_a < 1.6) return v;
         else return 1;
+    }
+    float G1(const XYZ& vec) const {
+        float c = std::min(XYZ::dot(vec, normal), 0.99f);
+        float s_2 = 1 - c * c;
+        float t_2 = s_2 / (c * c);
+        return 1 / (1 + (-1 + sqrt(1 + a * a * t_2)) / 2);
     }
     float G_GGX() const {
         return G1(out) * G1(in);
@@ -218,11 +241,11 @@ public:
         float b = std::min(Ti, To);
 
         float A = 1 - 0.5 * s_2 / (s_2 + 0.33);
-        float B = 0.45 * s_2 / (s_2 + 0.09) * (sin(a) - ((dot_AD >= 0) ? pow(2 * b / PI, 3) : 0));
+        float B = 0.45 * s_2 / (s_2 + 0.09) * (VecLib::full_sin(a) - ((dot_AD >= 0) * pow(2 * b / PI, 3)));
         float C = 0.125 * s_2 / (s_2 + 0.09) * pow(4 * a * b / PI, 2);
 
         XYZ modifier = color / PI;
-        float L1 = (A + B * std::max(0.0f, dot_AD) * tan(b) + C * (1 - abs(dot_AD)) * tan((a + b) / 2));
+        float L1 = (A + B * std::max(0.0f, dot_AD) * VecLib::tan(b) + C * (1 - abs(dot_AD)) * VecLib::tan((a + b) / 2));
         float L2 = 0.17 * s_2 / (s_2 + 0.13) * (1 - dot_AD) * pow(2 * b / PI, 2);
 
         XYZ final = modifier * L1 + color * modifier * L2;
@@ -331,5 +354,98 @@ public:
             emissive.getValue(U, V),
             normal.getValue(U, V)
         );
+    }
+};
+
+class AVX_MaterialSample {
+public:
+    m256_vec3 color;
+    __m256 roughness;
+    __m256 metallic;
+    __m256 specularFactor;
+    m256_vec3 emissive;
+    m256_vec3 normalPertubation;
+    __m256 transmission;
+    __m256 IOR;
+    __m256 use_normal;
+
+    __m256 fresnel_0;
+    __m256 max_fresnel;
+    void R0() {
+        __m256 spec = _mm256_div_ps( // n1-n2 / n1+n2
+            _mm256_sub_ps(AVX_ONES, IOR),
+            _mm256_add_ps(AVX_ONES, IOR)
+        );
+        fresnel_0 = _mm256_mul_ps(spec, spec); //square it
+    }
+    __m256 G1(const __m256& dot) const {
+        __m256 c_2 = _mm256_mul_ps(dot, dot);
+        __m256 a_2 = _mm256_mul_ps(roughness, roughness);
+        __m256 s_2 = _mm256_sub_ps(AVX_ONES, c_2);
+        __m256 t_2 = _mm256_div_ps(c_2, s_2);
+        __m256 g1rt = _mm256_sqrt_ps(_mm256_fmadd_ps(a_2, t_2, AVX_ONES));
+        __m256 denom = _mm256_add_ps(AVX_ONES, _mm256_fmsubadd_ps(g1rt, AVX_HALFS, AVX_HALFS));
+        __m256 g1final = _mm256_div_ps(AVX_ONES, denom);
+        return g1final;
+    }
+    void PDF_specular_BRDF(m256_vec3& outputs, const __m256& dot_NO, const __m256& dot_NI) {
+        
+        R0();
+        __m256 f_a = _mm256_sub_ps(AVX_ONES, metallic);
+        f_a = _mm256_mul_ps(fresnel_0, f_a);
+        outputs.X = _mm256_add_ps(f_a, _mm256_mul_ps(metallic, color.X));
+        outputs.Y = _mm256_add_ps(f_a, _mm256_mul_ps(metallic, color.Y));
+        outputs.Z = _mm256_add_ps(f_a, _mm256_mul_ps(metallic, color.Z)); //calculating metallic fresnel tint
+        max_fresnel = _mm256_mul_ps( //gets the max color channel, and multiplies it by the fresnel value
+            _mm256_max_ps(
+                _mm256_max_ps(
+                    outputs.X,
+                    outputs.Y
+                ),
+                outputs.Z
+            ),
+            fresnel_0
+        );
+        outputs.X = _mm256_div_ps(outputs.X, max_fresnel);//normalize fresnel return such that the max is 1
+        outputs.Y = _mm256_div_ps(outputs.X, max_fresnel);
+        outputs.Z = _mm256_div_ps(outputs.X, max_fresnel);
+        __m256 g2 = _mm256_mul_ps(//geometric term
+            G1(dot_NO),
+            G1(dot_NI)
+        );
+        outputs.X = _mm256_mul_ps(outputs.X, g2);
+        outputs.Y = _mm256_mul_ps(outputs.Y, g2);
+        outputs.Z = _mm256_mul_ps(outputs.Z, g2);
+    }
+    void lambertian_BRDF(m256_vec3& outputs) {
+        outputs.X = _mm256_div_ps(color.X, AVX_PI);
+        outputs.Y = _mm256_div_ps(color.Y, AVX_PI);
+        outputs.Z = _mm256_div_ps(color.Z, AVX_PI);
+    }
+    AVX_MaterialSample(Material** materials, float* UV_U, float* UV_V) {
+        for (int i = 0; i < 8; i++) color.set(i, materials[i]->color.getValue(UV_U[i], UV_V[i]));
+        for (int i = 0; i < 8; i++) emissive.set(i, materials[i]->emissive.getValue(UV_U[i], UV_V[i]));
+        for (int i = 0; i < 8; i++) normalPertubation.set(i, materials[i]->normal.getValue(UV_U[i], UV_V[i]));
+        for (int i = 0; i < 8; i++) ((float*)&roughness)[i] =  materials[i]->roughness.getValue(UV_U[i], UV_V[i]);
+        for (int i = 0; i < 8; i++) ((float*)&metallic)[i]  = materials[i]->metallic.getValue(UV_U[i], UV_V[i]);
+        for (int i = 0; i < 8; i++) ((float*)&specularFactor)[i] = materials[i]->specular.getValue(UV_U[i], UV_V[i]);
+        for (int i = 0; i < 8; i++) ((float*)&IOR)[i] = materials[i]->IOR.getValue(UV_U[i], UV_V[i]);
+        for (int i = 0; i < 8; i++) ((float*)&use_normal)[i] = std::bit_cast<float>(materials[i]->use_normals * 0xffffffff);
+        roughness = _mm256_fmadd_ps(
+            _mm256_set1_ps(0.999),
+            roughness,
+            _mm256_set1_ps(0.001)
+        );
+    }
+    void transfer(int origin, int target) {
+        color.transfer(origin, target);
+        emissive.transfer(origin, target);
+        normalPertubation.transfer(origin, target);
+        ((float*)&roughness)[target] = ((float*)&roughness)[origin];
+        ((float*)&metallic)[target] = ((float*)&metallic)[origin];
+        ((float*)&specularFactor)[target] = ((float*)&specularFactor)[origin];
+        ((float*)&IOR)[target] = ((float*)&IOR)[origin];
+        ((float*)&use_normal)[target] = ((float*)&use_normal)[origin];
+
     }
 };

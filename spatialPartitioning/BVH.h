@@ -231,20 +231,20 @@ public:
         if (c1 == nullptr) return 0;
         return (c1->avg_path() + c2->avg_path()) / 2.0;
     }
-    vector<PackagedTri> get_emissive_tris() {
+    vector<PackagedTri> get_emissive_tris(vector<Material>& materials) {
         vector<PackagedTri> out;
-        get_emissive_tris(out);
+        get_emissive_tris(out,materials);
         return out;
     }
-    void get_emissive_tris(vector<PackagedTri>& vec) {
+    void get_emissive_tris(vector<PackagedTri>& vec, vector<Material>& materials) {
         if (c1 != nullptr) {
-            c1->get_emissive_tris(vec);
-            c2->get_emissive_tris(vec);
+            c1->get_emissive_tris(vec,materials);
+            c2->get_emissive_tris(vec,materials);
         }
         else {
             for (int i = 0; i < elements.size(); i++) {
                 Tri* t = elements[i];
-                if (t->material->emissive.getValue().magnitude() > 0) {
+                if (materials[t->material].emissive.getValue().magnitude() > 0) {
                     vec.push_back(t->pack());
                 }
             }

@@ -21,10 +21,21 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 
 #define PI 3.14159265358979323846264
+#define fPI 3.14159265358979323846264f
 
 #define kEpsilon 0.000000001
 
 extern const __m256 AVX_ZEROS;
+extern const __m256 AVX_ONES;
+extern const __m256 AVX_HALFS;
+extern const __m256 AVX_NEG_ONES;
+extern const __m256 AVX_PI;
+extern const __m256 AVX_2PI;
+extern const __m256 AVX_3O2_PI;
+extern const __m256 AVX_HALF_PI;
+extern const __m256 AVX_SIGN_MASK;
+extern const __m256 AVX_ABS_MASK;
+extern const __m256 AVX_PACKED_ONES;
 const int one = 1;
 extern float float_one;
 extern const __m256 AVX_FINT_ONES;

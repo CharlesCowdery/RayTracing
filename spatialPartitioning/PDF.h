@@ -127,5 +127,42 @@ namespace PDF {
         index = std::max(0,std::min(1023, index));
         return lookup[offset + index];
     }
+    namespace analytical_GGX {
+        //implementation pulled from eric heitz's paper on sampling the visible distribution of normals. 
+        //implementation https://inria.hal.science/hal-00996995v2/file/supplemental1.pdf
+        //original paper https://inria.hal.science/hal-00996995v1/
+        float g1_GGX(float t) {
+            return 1 / (1 + (-1 + sqrt(1 + t*t) / 2));
+        }
 
+        XYZ sample(const float& dot_NI, float u1,float u2) {
+            float cos_I = dot_NI;
+            float sine_I = sqrt(1 - cos_I * cos_I);
+            float tan_NI = sine_I / cos_I;
+            float A = 2 * u1 / g1_GGX(tan_NI);
+            float B = tan_NI;
+            float dAF = (A * A - 1); //denominator A factor
+            float B_2 = B * B;
+            float A_2 = A * A;
+            float rt_factor = sqrt(B_2 / (dAF * dAF) - (A_2 - B_2) / dAF);
+            float x_m1 = B / dAF - rt_factor;
+            float x_m2 = B / dAF + rt_factor;
+            bool x_m_selector = (A < 0) || (x_m2>1.0 / tan_NI); //not sure what the second term is doing but whatever
+            float x_m = x_m_selector ? x_m1 : x_m2;
+            float s;
+            if (u2 <= 0.5) {
+                s = 1;
+                u2 = 2 * (u2 - 0.5);
+            }
+            else {
+                s = -1;
+                u2 = 2 * (0.5 - u2);
+            }
+            float z = s * (0.46341 * u2 - 0.73369 * u2 * u2 + 0.27385 * u2 * u2 * u2)
+                /
+                (0.597999 - u2 + 0.309420 * u2 * u2 + 0.093073 * u2 * u2 * u2);
+            return XYZ();
+        }
+
+    }
 }

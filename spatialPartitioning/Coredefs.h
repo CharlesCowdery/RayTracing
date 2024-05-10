@@ -5,15 +5,13 @@
 
 struct CastResults {
     static const float default_distance;
-    XYZ normal;
-    Material* material;
+    uint32_t material;
     float distance;
     XYZ TUV = XYZ(-1);
     XY texUV = XY(-1);
-    int parent_index = 0;
     int tri_index = 0;
     CastResults();
-    CastResults(XYZ _normal, Material* _mat);
+    CastResults( short _mat);
 };
 
 struct Casting_Diagnostics {

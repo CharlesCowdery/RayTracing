@@ -10,7 +10,8 @@ struct PackagedRay {
     char generation = 0;
     XYZ* output;
     XYZ coefficient;
-    Material* IOR_stack[IOR_STACK_SIZE];
+    short IOR_stack[IOR_STACK_SIZE];
+    char IOR_size = 0;
     PackagedRay() {};
     PackagedRay(XYZ _position, XYZ _slope, char gen, XYZ coef = XYZ(1,1,1)) :
         position(_position),

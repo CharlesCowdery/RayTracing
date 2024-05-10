@@ -14,8 +14,18 @@ using namespace std::chrono;
 
 
 const __m256 AVX_ZEROS = _mm256_set1_ps(0);
+const __m256 AVX_ONES = _mm256_set1_ps(1);
+const __m256 AVX_HALFS = _mm256_set1_ps(0.5);
+const __m256 AVX_NEG_ONES = _mm256_set1_ps(-1);
+const __m256 AVX_PI = _mm256_set1_ps(PI);
+const __m256 AVX_HALF_PI = _mm256_set1_ps(PI*0.5);
+const __m256 AVX_3O2_PI = _mm256_set1_ps(PI*1.5);
+const __m256 AVX_2PI = _mm256_set1_ps(2*PI);
+const __m256 AVX_SIGN_MASK = _mm256_set1_ps(std::bit_cast<float>(0x80000000));
+const __m256 AVX_ABS_MASK = _mm256_set1_ps(std::bit_cast<float>(~0x80000000));
 float float_one = *((float*)&one);
 const __m256 AVX_FINT_ONES = _mm256_set1_ps(float_one);
+const __m256 AVX_PACKED_ONES = _mm256_set1_ps(std::bit_cast<float>(0xffffffff));
 
 thread_local XorGen gen;
 

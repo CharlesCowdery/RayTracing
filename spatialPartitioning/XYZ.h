@@ -23,6 +23,7 @@ struct m256_vec2 {
     m256_vec2(XY fill);
     m256_vec2(std::vector<XY> input);
     XY at(int i) const;
+    void set(int i, XY v);
 };
 
 struct XY {
@@ -43,6 +44,7 @@ struct XY {
 
 struct XYZ;
 std::ostream& operator<<(std::ostream& os, XYZ& m);
+
 
 struct XYZ {
 public:
@@ -71,6 +73,7 @@ public:
     float magnitude();
     float magnitude_noRT();
     void normalize();
+    bool wellDefined() const;
     std::string to_string() const;
     static float magnitude(const XYZ& v);
     static XYZ reflect(XYZ vector, XYZ pole);
@@ -168,10 +171,22 @@ struct m256_vec3 {
     m256_vec3(XYZ fill);
     m256_vec3(std::vector<XYZ> input);
     XYZ at(int i) const;
+    void set(int i, XYZ v);
+    void transfer(int origin, int target);
     static void sub(const m256_vec3& v1, const m256_vec3& v2, m256_vec3& output);
+    static m256_vec3 sub(const m256_vec3& v1, const m256_vec3& v2);
     static m256_vec3 sub_inline(const m256_vec3& v1, const m256_vec3& v2);
+    static m256_vec3 mul(const m256_vec3& v1, const m256_vec3& v2);
+    static m256_vec3 mul(const m256_vec3& v1, const __m256& v2);
+    static m256_vec3 muladd(const m256_vec3& v1, const __m256& v2, const  m256_vec3& v3);
+    static m256_vec3 bitwise_xor(const m256_vec3& v1, const __m256& v2);
+    static m256_vec3 bitwise_or(const m256_vec3& v1, const  m256_vec3& v2);
+    static m256_vec3 bitwise_and(const m256_vec3& v1, const __m256& v2);
+    static __m256 dot(const m256_vec3& v1, const m256_vec3& v2);
+    static m256_vec3 normalize(const m256_vec3& v);
+    static m256_vec3 cross(const m256_vec3& v1, const m256_vec3& v2);
+    static m256_vec3 apply_matrix(const m256_vec3 v, const m256_vec3 m1, const m256_vec3 m2, const m256_vec3 m3);
 };
-
 struct Quat : public XYZ {
     float W;
     Quat();

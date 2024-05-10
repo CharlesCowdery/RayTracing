@@ -41,6 +41,11 @@ public:
     sf::Texture noise_texture;
     sf::Sprite  noise_sprite;
 
+    sf::RenderWindow* denoised_window;
+    sf::Texture denoised_texture;
+    sf::Sprite  denoised_sprite;
+    sf::Image denoised_canvas;
+
     map<string, sf::Texture> textures;
     map<string, sf::Sprite> sprites;
     map<string, sf::Image> images;
@@ -63,6 +68,9 @@ public:
         render_sprite.setScale(make_scale(), -make_scale());
         render_sprite.setPosition(0, make_scale() * current_resolution_y);
         focus_size = XY(block_size, block_size);
+        denoised_canvas.create(current_resolution_x, current_resolution_y, sf::Color::Black);
+        denoised_sprite.setScale(make_scale(), -make_scale());
+        denoised_sprite.setPosition(0, make_scale() * current_resolution_y);
     }
 
     void hold_window() {
@@ -88,6 +96,7 @@ public:
         cout << "Opening Window...." << flush;
         window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * make_scale(), current_resolution_y * make_scale()), "Render Window!");
         cout << "Done" << endl;
+        denoised_window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * 1, current_resolution_y * 1), "denoised Window!");
     }
     void create_noise_window() {
         noise_window = new sf::RenderWindow(sf::VideoMode(current_resolution_x * 1, current_resolution_y * 1), "Noise Window!");
@@ -95,6 +104,10 @@ public:
     void commit_pixel(XYZ color, int x, int y) {
         auto sfcolor = sf::Color(color.X, color.Y, color.Z);
         canvas.setPixel(x, y, sfcolor);
+    }
+    void commit_denoised_pixel(XYZ color, int x, int y) {
+        auto sfcolor = sf::Color(color.X, color.Y, color.Z);
+        denoised_canvas.setPixel(x, y, sfcolor);
     }
     void partial_render() {
         window->clear();
@@ -115,6 +128,11 @@ public:
         draw_noise_rects();
         noise_window->display();
     }
+    void denoised_pass() {
+        denoised_window->clear();
+        draw_denoised_sprite();
+        denoised_window->display();
+    }
     void update_focuses() {
         XY scaled_size = focus_size * make_scale();
         for (int i = 0; i < focuses.size(); i++) {
@@ -128,6 +146,9 @@ public:
     }
     void draw_render_sprite() {
         window->draw(render_sprite);
+    }
+    void draw_denoised_sprite() {
+        denoised_window->draw(denoised_sprite);
     }
     void draw_secondary_sprites() {
         for (auto i = sprites.begin(); i != sprites.end(); i++) {
@@ -168,9 +189,15 @@ public:
         render_sprite.setTexture(render_texture, false);
         render_pass();
     }
+    void commit_denoised_canvas() {
+        denoised_texture.loadFromImage(denoised_canvas);
+        denoised_sprite.setTexture(denoised_texture, false);
+        denoised_pass();
+    }
     void update_noise() {
         noise_pass();
     }
+
     void add_texture_sprite(string name) {
         textures[name] = sf::Texture();
         sprites[name] = sf::Sprite();
@@ -222,6 +249,17 @@ public:
                 // update the view to the new size of the window
                 sf::FloatRect visibleArea(0, 0, event.size.width, event.size.height);
                 noise_window->setView(sf::View(visibleArea));
+            }
+        }
+    }
+    void handle_events_denoised() {
+        sf::Event event;
+        while (denoised_window->pollEvent(event)) {
+            if (event.type == sf::Event::Resized)
+            {
+                // update the view to the new size of the window
+                sf::FloatRect visibleArea(0, 0, event.size.width, event.size.height);
+                denoised_window->setView(sf::View(visibleArea));
             }
         }
     }

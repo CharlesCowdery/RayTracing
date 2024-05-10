@@ -83,6 +83,10 @@ XY m256_vec2::at(int i) const {
     double y = ((float*)&Y)[i];
     return XY(x, y);
 }
+void m256_vec2::set(int i, XY v) {
+    ((float*)&X)[i] = v.X;
+    ((float*)&Y)[i] = v.Y;
+}
 
 
 XYZ::XYZ() : X(0), Y(0), Z(0) {}
@@ -313,6 +317,16 @@ float XYZ::length(const XYZ& vector) {
     return XYZ(-v.X, -v.Y, -v.Z);
 }
 
+
+bool is_valid_float(float x) {
+    const static unsigned int check_mask = 0x7f800000u;
+    return (std::bit_cast<unsigned int>(x) & check_mask) != check_mask;
+}
+
+bool XYZ::wellDefined() const {
+    return is_valid_float(X) && is_valid_float(Y) && is_valid_float(Z);
+}
+
 std::string XYZ::to_string() const {
     std::string xstr = std::to_string(X);
     xstr = ((X > 0) ? " " : "") + xstr;
@@ -468,16 +482,126 @@ XYZ m256_vec3::at(int i) const {
     double z = ((float*)&Z)[i];
     return XYZ(x, y, z);
 }
+void m256_vec3::transfer(int origin, int target) {
+    set(target, at(origin));
+}
 void m256_vec3::sub(const m256_vec3& v1, const m256_vec3& v2, m256_vec3& output) {
     output.X = _mm256_sub_ps(v1.X, v2.X);
     output.Y = _mm256_sub_ps(v1.Y, v2.Y);
     output.Z = _mm256_sub_ps(v1.Z, v2.Z);
+}
+m256_vec3 m256_vec3::sub(const m256_vec3& v1, const m256_vec3& v2) {
+    m256_vec3 output;
+    output.X = _mm256_sub_ps(v1.X, v2.X);
+    output.Y = _mm256_sub_ps(v1.Y, v2.Y);
+    output.Z = _mm256_sub_ps(v1.Z, v2.Z);
+    return output;
 }
 m256_vec3 m256_vec3::sub_inline(const m256_vec3& v1, const m256_vec3& v2) {
     m256_vec3 output;
     sub(v1, v2, output);
     return output;
 }
+m256_vec3 m256_vec3::mul(const m256_vec3& v1, const m256_vec3& v2) {
+    m256_vec3 output;
+    output.X = _mm256_mul_ps(v1.X, v2.X);
+    output.Y = _mm256_mul_ps(v1.Y, v2.Y);
+    output.Z = _mm256_mul_ps(v1.Z, v2.Z);
+    return output;
+}
+m256_vec3 m256_vec3::mul(const m256_vec3& v1, const __m256& v2) {
+    m256_vec3 output;
+    output.X = _mm256_mul_ps(v1.X, v2);
+    output.Y = _mm256_mul_ps(v1.Y, v2);
+    output.Z = _mm256_mul_ps(v1.Z, v2);
+    return output;
+}
+m256_vec3 m256_vec3::muladd(const m256_vec3& v1, const __m256& v2, const  m256_vec3& v3) {
+    m256_vec3 output;
+    output.X = _mm256_fmadd_ps(v1.X, v2, v3.X);
+    output.Y = _mm256_fmadd_ps(v1.Y, v2, v3.Y);
+    output.Z = _mm256_fmadd_ps(v1.Z, v2, v3.Z);
+    return output;
+}
+m256_vec3 m256_vec3::normalize(const m256_vec3& v1) {
+    __m256 mag = _mm256_sqrt_ps(
+        _mm256_fmadd_ps(
+            v1.X,
+            v1.X,
+            _mm256_fmadd_ps(
+                v1.Y,
+                v1.Y,
+                _mm256_mul_ps(
+                    v1.Z,
+                    v1.Z
+                )
+            )
+        )
+    );
+    m256_vec3 output;
+    output.X = _mm256_div_ps(v1.X, mag);
+    output.Y = _mm256_div_ps(v1.Y, mag);
+    output.Z = _mm256_div_ps(v1.Z, mag);
+    return output;
+
+}
+m256_vec3 m256_vec3::bitwise_xor(const m256_vec3& v1, const __m256& v2) {
+    m256_vec3 output;
+    output.X = _mm256_xor_ps(v1.X, v2);
+    output.Y = _mm256_xor_ps(v1.Y, v2);
+    output.Z = _mm256_xor_ps(v1.Z, v2);
+    return output;
+}
+m256_vec3 m256_vec3::bitwise_or(const m256_vec3& v1, const m256_vec3& v2) {
+    m256_vec3 output;
+    output.X = _mm256_or_ps(v1.X, v2.X);
+    output.Y = _mm256_or_ps(v1.Y, v2.Y);
+    output.Z = _mm256_or_ps(v1.Z, v2.Z);
+    return output;
+}
+m256_vec3 m256_vec3::bitwise_and(const m256_vec3& v1, const __m256& v2) {
+    m256_vec3 output;
+    output.X = _mm256_and_ps(v1.X, v2);
+    output.Y = _mm256_and_ps(v1.Y, v2);
+    output.Z = _mm256_and_ps(v1.Z, v2);
+    return output;
+}
+__m256 m256_vec3::dot(const m256_vec3& v1, const m256_vec3& v2) {
+    return _mm256_fmadd_ps(
+        v1.X,
+        v2.X,
+        _mm256_fmadd_ps(
+            v1.Y,
+            v2.Y,
+            _mm256_mul_ps(
+                v1.Z,
+                v2.Z
+            )
+        )
+    );
+}
+void m256_vec3::set(int i, XYZ v) {
+    ((float*)&X)[i] = v.X;
+    ((float*)&Y)[i] = v.Y;
+    ((float*)&Z)[i] = v.Z;
+}
+
+m256_vec3 m256_vec3::cross(const m256_vec3& v1, const m256_vec3& v2) {
+    m256_vec3 output;
+    output.X = _mm256_fmsub_ps(v1.Y, v2.Z, _mm256_mul_ps(v1.Z, v2.Y));
+    output.Y = _mm256_fmsub_ps(v1.Z, v2.X, _mm256_mul_ps(v1.X, v2.Z));
+    output.Z = _mm256_fmsub_ps(v1.X, v2.Y, _mm256_mul_ps(v1.Y, v2.X));
+    return output;
+}
+m256_vec3 m256_vec3::apply_matrix(const m256_vec3 v, const m256_vec3 m1, const m256_vec3 m2, const m256_vec3 m3) {
+    m256_vec3 output;
+    output.X = _mm256_fmadd_ps(v.X, m1.X, _mm256_fmadd_ps(v.Y, m2.X, _mm256_mul_ps(v.Z, m3.X)));
+    output.Y = _mm256_fmadd_ps(v.X, m1.Y, _mm256_fmadd_ps(v.Y, m2.Y, _mm256_mul_ps(v.Z, m3.Y)));
+    output.Z = _mm256_fmadd_ps(v.X, m1.Z, _mm256_fmadd_ps(v.Y, m2.Z, _mm256_mul_ps(v.Z, m3.Z)));
+    return output;
+}
+
+
 
     Quat::Quat() : XYZ(), W(0) {}
     Quat::Quat(XYZ _XYZ, float _W) : XYZ(_XYZ), W(_W) {}

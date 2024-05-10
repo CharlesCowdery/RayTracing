@@ -12,10 +12,10 @@ using std::string;
 
 class Primitive {
 public:
-    Material* material;
+    uint32_t material;
     //pair<XYZ, XYZ> bounds;
     XYZ origin;
-    Primitive(Material* _material) :material(_material) {}
+    Primitive(short _material) :material(_material) {}
     virtual pair<XYZ, XYZ> get_bounds() { return pair<XYZ, XYZ>(); }
 };
 
@@ -61,7 +61,14 @@ public:
 
 struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ p1;
+    XYZ p1p3;
+    XYZ p1p2;
+    XY UV_basis;
+    XY U_delta;
+    XY V_delta;
+    uint32_t material;
     XYZ normal;
+    XYZ origin_offset;
     XYZ n1;
     XYZ n2;
     XYZ n3;
@@ -71,21 +78,16 @@ struct PackagedTri { //reduced memory footprint to improve cache perf
     XYZ b1;
     XYZ b2;
     XYZ b3;
-    XYZ p1p3;
-    XYZ p1p2;
-    XY UV_basis;
-    XY U_delta;
-    XY V_delta;
-    Material* material;
-    XYZ origin_offset;
     PackagedTri() {}
-    PackagedTri(const XYZ& _p1, const XYZ& _p2, const XYZ& _p3, XY UV_base, XY UV_U, XY UV_V, Material* _material) {
+    PackagedTri(const XYZ& _p1, const XYZ& _p2, const XYZ& _p3, XY UV_base, XY UV_U, XY UV_V, short _material) {
         material = _material;
         p1 = _p1;
         p1p3 = _p3 - p1;
         p1p2 = _p2 - p1;
         U_delta = UV_U - UV_base;
         V_delta = UV_V - UV_base;
+        if (U_delta == 0) U_delta = XY(1,0);
+        if (V_delta == 0) V_delta = XY(0, 1);
         UV_basis = UV_base;
         normal = XYZ::normalize(XYZ::cross(p1p3, p1p2));
         origin_offset = XYZ::dot((_p1 + _p2 + _p3) / 3, normal) * normal;
@@ -126,16 +128,14 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
     m256_vec3 p1;
     m256_vec3 p1p2;
     m256_vec3 p1p3;
-    XYZ normal[8];
     XYZ origin_offset[8];
-    Material* materials[8];
+    uint32_t materials[8];
     int index = 0;
     char size = 0;
     PTri_AVX(vector<PackagedTri> tris) {
         vector<XYZ> _p1;
         vector<XYZ> _p1p2;
         vector<XYZ> _p1p3;
-        vector<XYZ> _normal;
         vector<XYZ> _origin_offset;
         size = tris.size();
         for (int i = 0; i < tris.size() && i < 8; i++) {
@@ -143,7 +143,6 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
             _p1.push_back(tri.p1);
             _p1p2.push_back(tri.p1p2);
             _p1p3.push_back(tri.p1p3);
-            _normal.push_back(tri.normal);
             _origin_offset.push_back(tri.origin_offset);
             materials[i] = tri.material;
         }
@@ -152,7 +151,6 @@ struct PTri_AVX { //literally 0.7kB of memory per object. What have I done.
         p1p3 = m256_vec3(_p1p3);
         for (int i = 0; i < tris.size(); i++) {
             origin_offset[i] = _origin_offset[i];
-            normal[i] = _normal[i];
         }
     }
     int get_index(int i) const {
@@ -237,7 +235,7 @@ public:
     XYZ midpoint;
     XYZ AABB_max;
     XYZ AABB_min;
-    Tri(XYZ _p1, XYZ _p2, XYZ _p3, XY _UV_1, XY _UV_2, XY _UV_3, Material* _material) : Primitive(_material),
+    Tri(XYZ _p1, XYZ _p2, XYZ _p3, XY _UV_1, XY _UV_2, XY _UV_3, short _material) : Primitive(_material),
         p1(_p1), p2(_p2), p3(_p3) {
         midpoint = (p1 + p2 + p3) / 3;
         AABB_max = XYZ::max(p1, XYZ::max(p2, p3));
@@ -252,7 +250,7 @@ public:
         n2 = normal;
         n3 = normal;
     }
-    Tri(XYZ _p1, XYZ _p2, XYZ _p3, Material* _material) : Primitive(_material),
+    Tri(XYZ _p1, XYZ _p2, XYZ _p3, short _material) : Primitive(_material),
         p1(_p1), p2(_p2), p3(_p3) {
         midpoint = (p1 + p2 + p3) / 3;
         AABB_max = XYZ::max(p1, XYZ::max(p2, p3));
@@ -381,9 +379,9 @@ public:
     string name = "";
     int primitive_count;
     Mesh() {}
-    void prep() {
+    void prep(vector<Material>& materials) {
         for (Tri& tri : tris) {
-            tri.material->prep();
+            materials[tri.material].prep();
         }
     }
     void addTri(Tri& T) {
@@ -417,9 +415,9 @@ public:
         children.push_back(object);
         object->parent = this;
     }
-    void prep() {
+    void prep(vector<Material>& materials) {
         for (Mesh* m : meshes) {
-            m->prep();
+            m->prep(materials);
         }
     }
     void fetchData(vector<Tri>& tris_vec) {

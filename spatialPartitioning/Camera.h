@@ -9,15 +9,15 @@ public:
     void (*_prep)(Lens* self, int resolution_x, int resolution_y, int subdivision_size);
     Lens* (*_clone)(Lens* self);
     XYZ(*_at)(Lens* self, int p_x, int p_y, int sample_index);
-    XYZ(*_random_at)(Lens* self, int p_x, int p_y);
+    XYZ(*_random_at)(Lens* self, int p_x, int p_y, int subindex);
     void prep(int resolution_x, int resolution_y, int subdivision_size) {
         _prep(this, resolution_x, resolution_y, subdivision_size);
     }
     XYZ at(int p_x, int p_y, int sample_index) {
         return _at(this, p_x, p_y, sample_index);
     }
-    XYZ random_at(int p_x, int p_y) {
-        return _random_at(this, p_x, p_y);
+    XYZ random_at(int p_x, int p_y, int subdiv_index) {
+        return _random_at(this, p_x, p_y, subdiv_index);
     }
     Lens* clone() {
         Lens* obj = _clone(this);
@@ -37,6 +37,8 @@ public:
     vector<vector<XY>> outputs;
     float pixel_width;
     float pixel_height;
+    float subdiv_width;
+    float subdiv_height;
     RectLens(float _width, float _height) :
         width(_width), height(_height) {
         _random_at = _random_at_function;
@@ -57,6 +59,8 @@ private:
         float offset_y = -height / 2;
         float subdiv_width_x = partial_width / subdivision_count;
         float subdiv_width_y = partial_height / subdivision_count;
+        self_rect->subdiv_width = subdiv_width_x;
+        self_rect->subdiv_height = subdiv_width_y;
         for (int y = 0; y < subdivision_count; y++) {
             for (int x = 0; x < subdivision_count; x++) {
                 self_rect->subdiv_offsets.push_back(XY(
@@ -84,11 +88,14 @@ private:
         XY pos = self_rect->outputs[p_y][p_x] + self_rect->subdiv_offsets[sample_index];
         return XYZ(pos.X, 0, pos.Y);
     }
-    static XYZ _random_at_function(Lens* self, int p_x, int p_y) {
+    static XYZ _random_at_function(Lens* self, int p_x, int p_y, int subindex) {
         RectLens* self_rect = (RectLens*)self;
-        XY pos = self_rect->outputs[p_y][p_x] + XY(gen.fRand(0, self_rect->pixel_width), gen.fRand(0, self_rect->pixel_height));
+        XY offset = self_rect->outputs[p_y][p_x];
+        XY subdiv_offset = self_rect->subdiv_offsets[subindex]-XY(self_rect->subdiv_width,self_rect->subdiv_height)*0.5;
+        XY pos = offset+ subdiv_offset + XY(gen.fRand(0, self_rect->subdiv_width), gen.fRand(0, self_rect->subdiv_height));
         return XYZ(pos.X, 0, pos.Y);
     }
+
     static Lens* _clone_function(Lens* self) {
         RectLens* rect_self = (RectLens*)self;
         Lens* obj = new RectLens(rect_self->width, rect_self->height);
@@ -128,8 +135,8 @@ public:
         return Quat::applyRotation(XYZ::slope(XYZ(0, 0, 0), lens->at(p_x, p_y, sample_index) + focal_position), rotation);
     }
 
-    XYZ random_slope_at(int p_x, int p_y) {
-        return Quat::applyRotation(XYZ::slope(XYZ(0, 0, 0), lens->random_at(p_x, p_y) + focal_position), rotation);
+    XYZ random_slope_at(int p_x, int p_y, int subdiv_index) {
+        return Quat::applyRotation(XYZ::slope(XYZ(0, 0, 0), lens->random_at(p_x, p_y, subdiv_index) + focal_position), rotation);
     }
 
     Camera* clone() {
