@@ -11,11 +11,15 @@
 
 ![kitchen](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/c6fe4d82-bf8c-4750-bdb7-9348dbd71569)
 
+![loft_saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/d7783647-1168-4801-8eeb-c38af42b228a)
+
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
 - Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/) and [(Heitz)](https://inria.hal.science/hal-00942452v1/document).
   - Specularity modeled by IOR via the GGX Microfacet BRDF model.
+  - Supports Full material transmission
   - Utilizes the Oren-Nayar diffuse equation.
+- Includes AI denoising via OpenImageDenoise
 - Full material texturing support, including normal mapping.
 - Vertex smoothing/smooth shading.
 - Direct light sampling for all implemented puctual light types.
@@ -36,11 +40,10 @@
 Red highlighting denotes areas of higher noise, and thus increased sampling priority.
 
 ## Future Improvements
-- Transmissive materials
 - Subsurface Scattering
 - BVH spatial splitting
 - Multithreaded QBVH specialized generation
-- Improved Monte Carlo Sampling / Importance Sampling
+- Improved Monte Carlo Sampling / Multiple Importance Sampling
 - Accelerated loading of large textures
 
 ## About the project
