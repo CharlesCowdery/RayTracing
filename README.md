@@ -9,10 +9,6 @@
 
 ![scandianIITheScandaning-saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/5875afe9-f6f2-4608-a954-d9b2a906085e)
 
-![kitchen](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/c6fe4d82-bf8c-4750-bdb7-9348dbd71569)
-
-![loft_saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/ef6c09f9-3a00-4d08-aa5d-0e64fa53e390)
-
 ## Features
 - Support for the open source GLTF file standard for 3d scenes.
 - Materials are based on the [OpenPBR BRDF reflectance model](https://academysoftwarefoundation.github.io/OpenPBR/) and [(Heitz)](https://inria.hal.science/hal-00942452v1/document).
@@ -27,6 +23,10 @@
 - Adaptive sampling allows for noise aware rendering
   - The noise analysis strategy is based roughly on [(Dammertz, Hanika)](https://www.semanticscholar.org/paper/A-Hierarchical-Automatic-Stopping-Condition-for-Dammertz-Hanika/8329759ae51c924557f375707e4989549c6c1b46). 
   - Based on a region priority model that directly relates samples per pass of each region to its noise.
+
+![kitchen](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/c6fe4d82-bf8c-4750-bdb7-9348dbd71569)
+
+![loft_saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/ef6c09f9-3a00-4d08-aa5d-0e64fa53e390)
 
 ## Technical Features
 - Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
