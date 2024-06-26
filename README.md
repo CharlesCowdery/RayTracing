@@ -29,7 +29,7 @@
 ![loft_saturated](https://github.com/CharlesCowdery/SpatialRay/assets/54870004/ef6c09f9-3a00-4d08-aa5d-0e64fa53e390)
 
 ## Technical Features
-- Raycasting is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
+- Raytracing/intersection is fully multithreaded, and utilizes AVX-256 SIMD hardware acceleration.
 - Acceleration is based on an AVX specialized 8 wide QBVH [(Wald, Benthin, Boulos)](https://www.cs.cmu.edu/afs/cs/academic/class/15869-f11/www/readings/wald08_widebvh.pdf).
 - Utilizes the visible normal distribution PDF detailed in [(Heitz,d'Eon)](https://inria.hal.science/hal-00996995v1/document#page=11&zoom=100,96,180).
 - Russian Roulette based ray termination
